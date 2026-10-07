@@ -8,10 +8,15 @@ use opentelemetry_proto::tonic::{
     trace::v1::{ResourceSpans, ScopeSpans, Span as RawSpan},
 };
 
+#[cfg(test)]
+#[path = "normalize_tests.rs"]
+mod tests;
+
 const MAX_SPANS_PER_EXPORT: usize = 1024;
 const MAX_ATTRIBUTE_DEPTH: usize = 16;
 const MAX_NORMALIZED_BYTES: usize = 16 * 1024 * 1024;
 
+// These strings stay internal; protocol errors deliberately contain no content.
 type ParseResult<T> = Result<T, &'static str>;
 
 pub(crate) struct NormalizedExport {
