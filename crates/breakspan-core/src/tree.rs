@@ -29,9 +29,23 @@ pub fn render_tree(trace: &Trace) -> String {
     let mut output = format!("Trace {} (snapshot, {} spans)\n", trace.id(), all.len());
     let mut visited = BTreeSet::new();
     // Unvisited components after roots are necessarily parent cycles.
-    for root in roots.into_iter().chain(all) {
-        if visited.contains(&root.id) {
+    for seed in roots.into_iter().chain(all) {
+        if visited.contains(&seed.id) {
             continue;
+        }
+        // A remaining seed may be a descendant of a cycle with an earlier
+        // timestamp (clock skew). Walk to the cycle before rendering, rather
+        // than splitting one component into several apparent roots.
+        let mut root = seed;
+        let mut ancestry = BTreeSet::new();
+        while let Some(parent_id) = root.parent_id {
+            if !ancestry.insert(root.id) {
+                break;
+            }
+            match trace.spans().get(&parent_id) {
+                Some(parent) => root = parent,
+                None => break,
+            }
         }
         let annotation = match root.parent_id {
             Some(parent) if !trace.spans().contains_key(&parent) => " [missing parent]",
@@ -134,6 +148,18 @@ mod tests {
         assert_eq!(tree.matches("child").count(), 1);
         assert!(!tree.contains('\x1b'));
         assert!(tree.contains("\\n"));
+    }
+
+    #[test]
+    fn early_cycle_descendants_do_not_split_the_component() {
+        let mut trace = Trace::new(TraceId::new([1; 16]).unwrap());
+        trace.insert(span(1, Some(2), "early child")).unwrap();
+        trace.insert(span(2, Some(3), "cycle a")).unwrap();
+        trace.insert(span(3, Some(2), "cycle b")).unwrap();
+        trace.insert(span(4, Some(1), "grandchild")).unwrap();
+        let tree = render_tree(&trace);
+        assert_eq!(tree.matches("cyclic parent component").count(), 1);
+        assert!(tree.contains("cycle a  6ms [cyclic parent component]\n├── early child  6ms\n│   └── grandchild  6ms\n└── cycle b  6ms"));
     }
 
     #[test]
