@@ -89,6 +89,10 @@ network arrival. Visual indentation is capped after 65 levels; all spans still
 render. Labels escape control characters and are limited to 200 characters.
 Parent relationships remain in the canonical data even when malformed as a graph.
 
+Inside `tree.rs`, private helpers separate hierarchy indexing and component-root
+selection from iterative traversal and text-line formatting. `render_tree` only
+orchestrates these steps; no public graph or renderer abstraction is introduced.
+
 OTLP exports completed spans, but does not announce a complete trace. Therefore
 CLI output is explicitly a **snapshot**, not a final run. Change notifications
 coalesce; after a change, the CLI prints all currently stored trace snapshots.
