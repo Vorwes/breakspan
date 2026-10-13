@@ -5,7 +5,7 @@ use breakspan_core::{
 use opentelemetry_proto::tonic::{
     collector::trace::v1::ExportTraceServiceRequest,
     common::v1::{AnyValue, KeyValue, any_value::Value},
-    trace::v1::{ResourceSpans, ScopeSpans, Span as RawSpan},
+    trace::v1::{ResourceSpans, ScopeSpans, Span as RawSpan, Status as RawStatus},
 };
 
 #[cfg(test)]
@@ -86,43 +86,13 @@ fn normalize_span(
         .map_err(|_| "reversed timing")?;
     spend(budget, 1024)?;
     let attributes = attributes(&raw.attributes, 0, budget)?;
-    let operation = match attributes.get("gen_ai.operation.name") {
-        Some(AttributeValue::String(name)) => match name.as_str() {
-            "invoke_agent" => OperationKind::Agent,
-            "chat" | "text_completion" | "generate_content" | "embeddings" => OperationKind::Model,
-            "execute_tool" => OperationKind::Tool,
-            _ => OperationKind::Other,
-        },
-        _ => OperationKind::Other,
-    };
-    let status = match &raw.status {
-        None => SpanStatus::Unset,
-        Some(status) => match status.code {
-            0 => SpanStatus::Unset,
-            1 => SpanStatus::Ok,
-            2 => SpanStatus::Error(copy_text(&status.message, budget)?),
-            code => SpanStatus::Unknown {
-                code,
-                message: copy_text(&status.message, budget)?,
-            },
-        },
-    };
+    let operation = classify_operation(&attributes);
+    let status = normalize_status(raw.status.as_ref(), budget)?;
     let resource_attributes = match &resource.resource {
         Some(resource) => self::attributes(&resource.attributes, 0, budget)?,
         None => Attributes::new(),
     };
-    let instrumentation = match &scope.scope {
-        Some(instrumentation) => InstrumentationScope {
-            name: copy_text(&instrumentation.name, budget)?,
-            version: copy_text(&instrumentation.version, budget)?,
-            attributes: self::attributes(&instrumentation.attributes, 0, budget)?,
-            schema_url: copy_text(&scope.schema_url, budget)?,
-        },
-        None => InstrumentationScope {
-            schema_url: copy_text(&scope.schema_url, budget)?,
-            ..Default::default()
-        },
-    };
+    let instrumentation = normalize_scope(scope, budget)?;
     Ok(Span {
         trace_id,
         id,
@@ -135,6 +105,48 @@ fn normalize_span(
         resource_attributes,
         resource_schema_url: copy_text(&resource.schema_url, budget)?,
         scope: instrumentation,
+    })
+}
+
+fn classify_operation(attributes: &Attributes) -> OperationKind {
+    match attributes.get("gen_ai.operation.name") {
+        Some(AttributeValue::String(name)) => match name.as_str() {
+            "invoke_agent" => OperationKind::Agent,
+            "chat" | "text_completion" | "generate_content" | "embeddings" => OperationKind::Model,
+            "execute_tool" => OperationKind::Tool,
+            _ => OperationKind::Other,
+        },
+        _ => OperationKind::Other,
+    }
+}
+
+fn normalize_status(status: Option<&RawStatus>, budget: &mut usize) -> ParseResult<SpanStatus> {
+    Ok(match status {
+        None => SpanStatus::Unset,
+        Some(status) => match status.code {
+            0 => SpanStatus::Unset,
+            1 => SpanStatus::Ok,
+            2 => SpanStatus::Error(copy_text(&status.message, budget)?),
+            code => SpanStatus::Unknown {
+                code,
+                message: copy_text(&status.message, budget)?,
+            },
+        },
+    })
+}
+
+fn normalize_scope(scope: &ScopeSpans, budget: &mut usize) -> ParseResult<InstrumentationScope> {
+    Ok(match &scope.scope {
+        Some(instrumentation) => InstrumentationScope {
+            name: copy_text(&instrumentation.name, budget)?,
+            version: copy_text(&instrumentation.version, budget)?,
+            attributes: attributes(&instrumentation.attributes, 0, budget)?,
+            schema_url: copy_text(&scope.schema_url, budget)?,
+        },
+        None => InstrumentationScope {
+            schema_url: copy_text(&scope.schema_url, budget)?,
+            ..Default::default()
+        },
     })
 }
 

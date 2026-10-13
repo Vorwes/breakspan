@@ -164,6 +164,11 @@ Names, prompts, provider/model identity and tool arguments/results are not neede
 for classification. No framework heuristics or speculative aliases are used.
 New conventions require a scoped normalization change with fixtures.
 
+In `normalize.rs`, ID/timing validation and final span construction stay together;
+private helpers isolate operation classification, status conversion and optional
+scope conversion. Budgeted copies retain their charge order, and the export-level
+loop restores the budget for rejected spans before processing siblings.
+
 Dependencies are actively maintained upstream libraries with concrete roles:
 - `opentelemetry-proto`: upstream generated messages and service; only `trace`
   and `gen-tonic` features enabled. It transitively brings the OTel API/SDK, but
