@@ -1,0 +1,20 @@
+[package]
+name = "breakspan-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "breakspan"
+path = "src/main.rs"
+
+[dependencies]
+breakspan-core.workspace = true
+breakspan-store.workspace = true
+breakspan-otlp.workspace = true
+clap.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
