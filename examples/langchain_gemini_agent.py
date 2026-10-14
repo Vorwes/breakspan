@@ -28,6 +28,7 @@ import warnings
 from pathlib import Path
 from typing import Literal
 
+from google.genai.errors import APIError
 from langchain.agents import create_agent
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, ToolMessage
@@ -75,6 +76,47 @@ def calculator(
     if not math.isfinite(result):
         raise ValueError("Result must be finite.")
     return result
+
+
+def provider_http_status(error):
+    # LangChain preserves server codes but wraps client errors with `from e`.
+    # Inspect only SDK errors and numeric HTTP codes, never messages/headers/body.
+    for _ in range(8):
+        if isinstance(error, APIError):
+            code = error.code
+            if type(code) is int and 400 <= code <= 599:
+                return code
+        error = error.__cause__
+        if error is None:
+            break
+    return None
+
+
+def agent_failure_message(error):
+    code = provider_http_status(error)
+    label = type(error).__name__
+    if code is not None:
+        label += f", HTTP {code}"
+    hints = {
+        400: "Gemini rejected the request. Check the API key and model/request settings.",
+        401: "Gemini rejected authentication. Verify GEMINI_API_KEY locally.",
+        403: "Gemini denied access. Check API-key restrictions and model permissions.",
+        404: f"Gemini could not find the model/API route. Verify access to {MODEL}.",
+        429: "Gemini reported a rate/quota limit. Check your quota and wait before retrying.",
+    }
+    if code is not None and code >= 500:
+        hint = (
+            "Gemini returned a server error, possibly a backend outage/overload or a "
+            "request-specific failure. Retry later; if persistent, test the model in "
+            "Google AI Studio. This example does not retry or switch models automatically."
+        )
+    else:
+        hint = hints.get(
+            code,
+            f"Check your API key, access to {MODEL}, quota, and network. "
+            "No more specific safe diagnostic is available.",
+        )
+    return f"Agent failed ({label}). {hint} Raw error details remain redacted."
 
 
 def mark_error(span, error_type):
@@ -301,11 +343,7 @@ def main(argv=None):
         exit_code = 130
     except Exception as error:
         # Provider errors may contain credentials, request payloads or content.
-        print(
-            f"Agent failed ({type(error).__name__}). Check your API key, access to "
-            f"{MODEL}, quota, and network. Error details are not recorded.",
-            file=sys.stderr,
-        )
+        print(agent_failure_message(error), file=sys.stderr)
         exit_code = 1
     finally:
         try:

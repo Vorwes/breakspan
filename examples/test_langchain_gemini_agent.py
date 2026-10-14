@@ -12,6 +12,7 @@ from uuid import uuid4
 import grpc
 import langchain_gemini_agent as demo
 from google.genai import types
+from google.genai.errors import ClientError, ServerError
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 from opentelemetry.proto.collector.trace.v1 import (
@@ -330,6 +331,82 @@ class ExampleTests(unittest.TestCase):
             self.assertEqual(
                 config.tools[0].function_declarations[0].name, "calculator"
             )
+
+    def test_real_sdk_errors_report_safe_http_codes_without_leaking_content(self):
+        for code, hint in [
+            (400, "rejected the request"),
+            (401, "rejected authentication"),
+            (403, "denied access"),
+            (404, "could not find"),
+            (429, "rate/quota limit"),
+            (500, "server error"),
+            (503, "server error"),
+        ]:
+            with self.subTest(code=code):
+                model = demo.ChatGoogleGenerativeAI(
+                    model=demo.MODEL,
+                    api_key="offline-placeholder",
+                    vertexai=False,
+                    timeout=30,
+                    max_retries=0,
+                    max_tokens=1024,
+                    thinking_level="low",
+                )
+                self.addCleanup(model.client.close)
+                error_type = ClientError if code < 500 else ServerError
+                error = error_type(
+                    code,
+                    {
+                        "error": {
+                            "status": "PRIVATE-STATUS",
+                            "message": "PRIVATE-KEY PRIVATE-PROMPT",
+                        }
+                    },
+                )
+                spans = []
+
+                def export(collector, endpoint):
+                    spans.extend(collector.get_finished_spans())
+                    return True
+
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    patch.dict(os.environ, {"GEMINI_API_KEY": "PRIVATE-KEY"}),
+                    patch.object(demo, "ChatGoogleGenerativeAI", return_value=model),
+                    patch.object(
+                        model.client.models, "generate_content", side_effect=error
+                    ) as request,
+                    patch.object(demo, "export_trace", side_effect=export),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
+                    self.assertEqual(demo.main([]), 1)
+                self.assertEqual(request.call_count, 1)
+                self.assertIn(f"HTTP {code}", stderr.getvalue())
+                self.assertIn(hint, stderr.getvalue())
+                self.assertNotIn("PRIVATE-", stdout.getvalue() + stderr.getvalue())
+                self.assertEqual(len(spans), 2)
+                for span in spans:
+                    self.assertEqual(span.status.status_code, StatusCode.ERROR)
+                    self.assertEqual(span.events, ())
+                    self.assertNotIn("PRIVATE-", repr(span.attributes))
+
+    def test_status_extraction_ignores_arbitrary_fields_and_handles_cause_cycles(self):
+        error = RuntimeError("PRIVATE-KEY")
+        error.code = 503  # Only a real SDK error is trusted for the code.
+        self.assertIsNone(demo.provider_http_status(error))
+        error.__cause__ = error
+        self.assertIsNone(demo.provider_http_status(error))
+        for invalid in [True, "PRIVATE-CODE", 503.0, 999]:
+            sdk_error = ServerError(503, {})
+            sdk_error.code = invalid
+            with self.subTest(code=invalid):
+                self.assertIsNone(demo.provider_http_status(sdk_error))
+                self.assertNotIn("PRIVATE-", demo.agent_failure_message(sdk_error))
+        wrapped = RuntimeError("PRIVATE-WRAPPER")
+        wrapped.__cause__ = ServerError(503, {"message": "PRIVATE-KEY"})
+        self.assertEqual(demo.provider_http_status(wrapped), 503)
+        self.assertNotIn("PRIVATE-", demo.agent_failure_message(wrapped))
 
     def test_agent_iteration_limit_closes_all_spans(self):
         responses = []
