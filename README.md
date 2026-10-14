@@ -79,6 +79,80 @@ Snapshots may repeat and be incomplete. OTLP has no trace-completion marker.
 Late parents repair subsequent snapshots; missing parents and cyclic components
 remain visible rather than disappearing. Siblings sort by start time, then ID.
 
+### Real LangChain + Gemini calculator agent
+
+This optional **external example** uses LangChain's agent loop, Gemini
+[`gemini-3.8-flash`](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash),
+and one calculator tool. Breakspan itself still makes no LLM calls.
+There is no Pi extension, collector, dashboard or LangSmith account to configure.
+Python 3.10+ and `uv` are sufficient; `uv` installs the inline dependencies.
+
+**Terminal 1:**
+
+```sh
+cargo run -p breakspan-cli -- listen
+```
+
+**Terminal 2:**
+
+```sh
+uv run examples/langchain_gemini_agent.py
+```
+
+Get a key from [Google AI Studio](https://aistudio.google.com/apikey). The script
+prompts for it without echoing or saving it. Alternatively, set `GEMINI_API_KEY`
+in your local environment (PowerShell: `$env:GEMINI_API_KEY`; Bash:
+`export GEMINI_API_KEY`). Do not share or commit the key. The example explicitly
+uses the Gemini Developer API and this key, not Vertex AI or `GOOGLE_API_KEY`.
+
+The default prompt asks the agent to multiply 12345 by 6789 using its calculator
+(expected result: **83,810,205**). You can supply another arithmetic prompt:
+
+```sh
+uv run examples/langchain_gemini_agent.py "Use the calculator to divide 144 by 12."
+```
+
+A normal run produces an agent span with model → tool → model children:
+
+```text
+invoke_agent calculator
+├── chat gemini-3.8-flash
+├── execute_tool calculator
+└── chat gemini-3.8-flash
+```
+
+Spans are buffered in the example and exported in one batch after it finishes,
+including on failure. The final answer is printed only in the example terminal.
+The callback exports operation/model/tool names, timing, status and error **types**,
+not prompts, arguments, results, credentials, raw errors or exception events.
+LangSmith tracing is explicitly disabled, and ambient OTel resource attributes
+and exporter auth headers are not copied. Model/tool spans are direct agent
+children; internal LangGraph nodes are omitted. This is a small smoke test, not
+a general-purpose LangChain instrumentation adapter.
+
+The calculator performs finite floating-point arithmetic without `eval`, file,
+shell or network access. Execution has an eight-step graph limit, 30-second
+per-request timeout, no automatic model retries, a 1,024-output-token limit,
+and a two-second OTLP export timeout. Export failures return a nonzero exit code;
+OTLP partial rejections can still occur, so check the receiver output. Use
+`--endpoint http://127.0.0.1:PORT` if listening on another local port.
+
+**Live requests require model access and consume your Gemini quota.** Free-tier
+eligibility is not guaranteed; check [pricing](https://ai.google.dev/gemini-api/docs/pricing)
+and [limits](https://ai.google.dev/gemini-api/docs/rate-limits). Use public/synthetic
+prompts, especially on unpaid services; review Google's [terms](https://ai.google.dev/gemini-api/terms).
+There is no silent fallback to another model if `gemini-3.8-flash` is unavailable.
+
+Credential-free tests use real LangChain agent execution, fake model responses,
+a stubbed Gemini SDK call, and a loopback OTLP/gRPC receiver:
+
+```sh
+uv run examples/langchain_gemini_agent.py --self-test
+```
+
+These tests never call Gemini and do not certify live account/model access.
+CI runs them on Linux and Windows separately from the Rust workspace.
+
 ### Options and safety
 
 ```sh
@@ -110,6 +184,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo build --workspace
+uv run examples/langchain_gemini_agent.py --self-test
 # Run only the real loopback gRPC integration suite:
 cargo test -p breakspan-otlp --test grpc_ingestion
 ```

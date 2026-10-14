@@ -192,8 +192,34 @@ Loopback gRPC tests bind an ephemeral port and use the upstream generated client
 representative exports, late parents across requests, typed unknown attributes,
 missing content/metadata, malformed spans, partial success, oversize requests,
 capacity limits and receiver recovery. No timing sleeps or external services are
-needed for the automated suite. The Python demo separately proves interoperability
-with an actual external OTel SDK/exporter.
+needed for the automated suite. The synthetic Python demo separately proves
+interoperability with an actual external OTel SDK/exporter.
+
+`examples/langchain_gemini_agent.py` is an optional external smoke harness using
+LangChain `create_agent`, Gemini `gemini-3.8-flash`, and a calculator tool. Its
+example-local callback emits an agent root with model/tool children using the
+operation mapping above; it intentionally omits internal graph/chain nodes.
+Only operation metadata and error types are exported, with content/exception
+recording and LangSmith tracing disabled. Explicit parent context and callback
+run IDs preserve parentage when tools execute on worker threads. Ended spans
+are collected locally and exported in one bounded-time OTLP/gRPC batch after
+success or failure. A failed export is distinct from failed agent execution;
+OTLP partial rejection still requires checking the receiver. Graph steps,
+model request time/retries/output tokens are bounded, but this is not a hard
+wall-clock or memory sandbox.
+
+Dependencies are inline and confined to the example: `langchain` supplies the
+agent loop, `langchain-google-genai` supplies the Gemini Developer API model,
+and the upstream Python OTel SDK/gRPC exporter supplies telemetry. No Rust
+crate gains a harness or LLM dependency. Direct dependency versions are pinned
+and tested; transitive dependencies are resolved by uv, not fully locked.
+Relevant upstream APIs are documented in the [LangChain agent guide](https://docs.langchain.com/oss/python/langchain/agents)
+and [Google integration guide](https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai).
+Automated example tests exercise real framework callbacks and Gemini request
+construction using fake/stubbed responses, calculator validation, error and
+incomplete-span cleanup, limits, metadata privacy and actual loopback OTLP
+transport. They need no credentials and make no Gemini calls; live model access,
+quota and answer quality must be checked separately by the user.
 
 The eventual progression is TRACE (what happened), DIFF (what changed), DIAGNOSE
 (where failure began), then REPLAY through compatible harnesses. First meaningful
