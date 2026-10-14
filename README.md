@@ -82,7 +82,7 @@ remain visible rather than disappearing. Siblings sort by start time, then ID.
 ### Real LangChain + Gemini calculator agent
 
 This optional **external example** uses LangChain's agent loop, Gemini
-[`gemini-3.8-flash`](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash),
+[`gemini-3.5-flash-lite`](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite),
 and one calculator tool. Breakspan itself still makes no LLM calls.
 There is no Pi extension, collector, dashboard or LangSmith account to configure.
 Python 3.10+ and `uv` are sufficient; `uv` installs the inline dependencies.
@@ -116,9 +116,9 @@ A normal run produces an agent span with model → tool → model children:
 
 ```text
 invoke_agent calculator
-├── chat gemini-3.8-flash
+├── chat gemini-3.5-flash-lite
 ├── execute_tool calculator
-└── chat gemini-3.8-flash
+└── chat gemini-3.5-flash-lite
 ```
 
 Spans are buffered in the example and exported in one batch after it finishes,
@@ -141,7 +141,7 @@ OTLP partial rejections can still occur, so check the receiver output. Use
 eligibility is not guaranteed; check [pricing](https://ai.google.dev/gemini-api/docs/pricing)
 and [limits](https://ai.google.dev/gemini-api/docs/rate-limits). Use public/synthetic
 prompts, especially on unpaid services; review Google's [terms](https://ai.google.dev/gemini-api/terms).
-There is no silent fallback to another model if `gemini-3.8-flash` is unavailable.
+There is no silent fallback to another model if `gemini-3.5-flash-lite` is unavailable.
 
 On failure, the example prints a numeric HTTP status when the Google SDK makes
 one available (including through LangChain exception wrappers), plus fixed

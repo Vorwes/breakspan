@@ -18,6 +18,8 @@ it must never own the agent loop or call an LLM to implement this milestone.
   concrete implementations and small reviewable diffs.
 - Work on an issue branch, never directly on `main`. Never broaden a GitHub issue
   without explicit approval. Stop and reassess unexpected scope growth.
+- Write GitHub issues, PR descriptions and comments as normal project updates.
+  Omit agent-role, owner-request and review/merge-role boilerplate.
 - Justify new dependencies, check upstream maintenance and compatibility, avoid
   overlapping libraries. Do not add future-feature abstractions speculatively.
 - Treat telemetry as untrusted. Never `unwrap()`/`expect()` it; propagate recoverable

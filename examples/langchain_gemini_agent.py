@@ -45,7 +45,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 from opentelemetry.trace import SpanKind, StatusCode
 
-MODEL = "gemini-3.8-flash"
+MODEL = "gemini-3.5-flash-lite"
 ENDPOINT = "http://127.0.0.1:4317"
 PROMPT = "Use the calculator tool to multiply 12345 by 6789, then report the answer."
 SYSTEM_PROMPT = (

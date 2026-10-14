@@ -118,7 +118,7 @@ class ExampleTests(unittest.TestCase):
         for span in children:
             self.assertEqual(span.parent.span_id, root.context.span_id)
         self.assertEqual(
-            children[0].attributes["gen_ai.request.model"], "gemini-3.8-flash"
+            children[0].attributes["gen_ai.request.model"], "gemini-3.5-flash-lite"
         )
         self.assertEqual(children[1].attributes["gen_ai.tool.name"], "calculator")
 
@@ -322,7 +322,7 @@ class ExampleTests(unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         self.assertEqual(len(self.spans()), 4)
         for call in request.call_args_list:
-            self.assertEqual(call.kwargs["model"], "gemini-3.8-flash")
+            self.assertEqual(call.kwargs["model"], "gemini-3.5-flash-lite")
             config = call.kwargs["config"]
             self.assertEqual(config.http_options.timeout, 30000)
             self.assertEqual(config.http_options.retry_options.attempts, 0)
@@ -495,7 +495,7 @@ class ExampleTests(unittest.TestCase):
             self.assertNotIn("GEMINI_API_KEY", os.environ)
         model.assert_not_called()
 
-    def test_main_uses_requested_model_and_credentials_and_closes_client(self):
+    def test_main_uses_configured_model_and_credentials_and_closes_client(self):
         with (
             patch.dict(
                 os.environ,
@@ -507,7 +507,7 @@ class ExampleTests(unittest.TestCase):
         ):
             self.assertEqual(demo.main([]), 0)
         kwargs = model.call_args.kwargs
-        self.assertEqual(kwargs["model"], "gemini-3.8-flash")
+        self.assertEqual(kwargs["model"], "gemini-3.5-flash-lite")
         self.assertEqual(kwargs["api_key"], "private-key")
         self.assertFalse(kwargs["vertexai"])
         self.assertEqual(kwargs["max_retries"], 0)

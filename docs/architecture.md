@@ -196,7 +196,7 @@ needed for the automated suite. The synthetic Python demo separately proves
 interoperability with an actual external OTel SDK/exporter.
 
 `examples/langchain_gemini_agent.py` is an optional external smoke harness using
-LangChain `create_agent`, Gemini `gemini-3.8-flash`, and a calculator tool. Its
+LangChain `create_agent`, Gemini `gemini-3.5-flash-lite`, and a calculator tool. Its
 example-local callback emits an agent root with model/tool children using the
 operation mapping above; it intentionally omits internal graph/chain nodes.
 Only operation metadata and error types are exported, with content/exception
