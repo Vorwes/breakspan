@@ -143,15 +143,9 @@ and [limits](https://ai.google.dev/gemini-api/docs/rate-limits). Use public/synt
 prompts, especially on unpaid services; review Google's [terms](https://ai.google.dev/gemini-api/terms).
 There is no silent fallback to another model if `gemini-3.5-flash-lite` is unavailable.
 
-On failure, the example prints a numeric HTTP status when the Google SDK makes
-one available (including through LangChain exception wrappers), plus fixed
-troubleshooting guidance. Raw response bodies, headers and error messages remain
-redacted. In this integration, `GoogleAPIError` wraps server errors: HTTP 500/503
-may mean a Gemini backend or request-specific failure; they do not by themselves
-indicate an invalid key.
-For HTTP 429 check quota; for 401/403 check authentication/access; for 404 check
-model availability. Share only the sanitized diagnostic line when asking for
-help. See Google's [troubleshooting guide](https://ai.google.dev/gemini-api/docs/troubleshooting).
+On failure, the example prints a simple failure message and still exports the
+trace. Provider error messages, HTTP failure reasons and response details are
+not printed or exported.
 
 Credential-free tests use real LangChain agent execution, fake model responses,
 a stubbed Gemini SDK call, and a loopback OTLP/gRPC receiver:
@@ -160,8 +154,10 @@ a stubbed Gemini SDK call, and a loopback OTLP/gRPC receiver:
 uv run examples/langchain_gemini_agent.py --self-test
 ```
 
-These tests never call Gemini and do not certify live account/model access.
-CI runs them on Linux and Windows separately from the Rust workspace.
+`examples/test_langchain_gemini_agent.py` contains the example's offline unit
+tests, not a second runnable Gemini example. These tests never call Gemini and
+do not certify live account/model access. CI runs them on Linux and Windows
+separately from the Rust workspace.
 
 ### Options and safety
 

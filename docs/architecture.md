@@ -219,10 +219,9 @@ Automated example tests exercise real framework callbacks and Gemini request
 construction using fake/stubbed responses, calculator validation, error and
 incomplete-span cleanup, limits, metadata privacy and actual loopback OTLP
 transport. They need no credentials and make no Gemini calls; live model access,
-quota and answer quality must be checked separately by the user. Local failure
-diagnostics may show an SDK-provided numeric HTTP code and fixed guidance,
-including through LangChain's exception causes; raw provider details remain
-redacted and are never exported.
+quota and answer quality must be checked separately by the user. The example
+prints only a simple failure message; raw provider details and HTTP failure
+reasons are neither printed nor exported.
 
 The eventual progression is TRACE (what happened), DIFF (what changed), DIAGNOSE
 (where failure began), then REPLAY through compatible harnesses. First meaningful

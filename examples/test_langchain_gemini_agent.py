@@ -332,16 +332,8 @@ class ExampleTests(unittest.TestCase):
                 config.tools[0].function_declarations[0].name, "calculator"
             )
 
-    def test_real_sdk_errors_report_safe_http_codes_without_leaking_content(self):
-        for code, hint in [
-            (400, "rejected the request"),
-            (401, "rejected authentication"),
-            (403, "denied access"),
-            (404, "could not find"),
-            (429, "rate/quota limit"),
-            (500, "server error"),
-            (503, "server error"),
-        ]:
+    def test_sdk_failures_do_not_print_details(self):
+        for code in [400, 401, 403, 404, 429, 500, 503]:
             with self.subTest(code=code):
                 model = demo.ChatGoogleGenerativeAI(
                     model=demo.MODEL,
@@ -382,31 +374,15 @@ class ExampleTests(unittest.TestCase):
                 ):
                     self.assertEqual(demo.main([]), 1)
                 self.assertEqual(request.call_count, 1)
-                self.assertIn(f"HTTP {code}", stderr.getvalue())
-                self.assertIn(hint, stderr.getvalue())
+                self.assertEqual(
+                    stderr.getvalue(), "Agent failed. Error details are not recorded.\n"
+                )
                 self.assertNotIn("PRIVATE-", stdout.getvalue() + stderr.getvalue())
                 self.assertEqual(len(spans), 2)
                 for span in spans:
                     self.assertEqual(span.status.status_code, StatusCode.ERROR)
                     self.assertEqual(span.events, ())
                     self.assertNotIn("PRIVATE-", repr(span.attributes))
-
-    def test_status_extraction_ignores_arbitrary_fields_and_handles_cause_cycles(self):
-        error = RuntimeError("PRIVATE-KEY")
-        error.code = 503  # Only a real SDK error is trusted for the code.
-        self.assertIsNone(demo.provider_http_status(error))
-        error.__cause__ = error
-        self.assertIsNone(demo.provider_http_status(error))
-        for invalid in [True, "PRIVATE-CODE", 503.0, 999]:
-            sdk_error = ServerError(503, {})
-            sdk_error.code = invalid
-            with self.subTest(code=invalid):
-                self.assertIsNone(demo.provider_http_status(sdk_error))
-                self.assertNotIn("PRIVATE-", demo.agent_failure_message(sdk_error))
-        wrapped = RuntimeError("PRIVATE-WRAPPER")
-        wrapped.__cause__ = ServerError(503, {"message": "PRIVATE-KEY"})
-        self.assertEqual(demo.provider_http_status(wrapped), 503)
-        self.assertNotIn("PRIVATE-", demo.agent_failure_message(wrapped))
 
     def test_agent_iteration_limit_closes_all_spans(self):
         responses = []
@@ -536,7 +512,10 @@ class ExampleTests(unittest.TestCase):
         model.return_value.client.close.assert_called_once()
         self.assertNotIn("private-key", stdout.getvalue() + stderr.getvalue())
         self.assertNotIn("private-prompt", stdout.getvalue() + stderr.getvalue())
-        self.assertIn("RuntimeError", stderr.getvalue())
+        self.assertIn(
+            "Agent failed. Error details are not recorded.", stderr.getvalue()
+        )
+        self.assertNotIn("RuntimeError", stderr.getvalue())
         self.assertIn("OTLP export failed", stderr.getvalue())
 
 
