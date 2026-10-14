@@ -226,6 +226,7 @@ class ExampleTests(unittest.TestCase):
         class Receiver(trace_service_pb2_grpc.TraceServiceServicer):
             def Export(self, request, context):
                 self.request = request
+                self.metadata = dict(context.invocation_metadata())
                 return trace_service_pb2.ExportTraceServiceResponse()
 
         receiver = Receiver()
@@ -236,7 +237,19 @@ class ExampleTests(unittest.TestCase):
         server.start()
         self.addCleanup(lambda: server.stop(0).wait())
         demo.run_agent(calculator_model(), self.tracer)
-        self.assertTrue(demo.export_trace(self.collector, f"http://127.0.0.1:{port}"))
+        with patch.dict(
+            os.environ,
+            {
+                "OTEL_EXPORTER_OTLP_HEADERS": "authorization=private-general-key",
+                "OTEL_EXPORTER_OTLP_TRACES_HEADERS": "authorization=private-trace-key",
+            },
+        ):
+            self.assertTrue(
+                demo.export_trace(self.collector, f"http://127.0.0.1:{port}")
+            )
+        self.assertNotIn("authorization", receiver.metadata)
+        self.assertNotIn("private-", repr(receiver.metadata))
+        self.assertEqual(receiver.metadata["x-breakspan-demo"], "langchain-gemini")
         spans = [
             span
             for resource in receiver.request.resource_spans
@@ -343,7 +356,10 @@ class ExampleTests(unittest.TestCase):
         ):
             exporter.return_value.export.return_value = demo.SpanExportResult.FAILURE
             self.assertFalse(demo.export_trace(self.collector, demo.ENDPOINT))
-        self.assertEqual(exporter.call_args.kwargs["headers"], {})
+        self.assertEqual(
+            exporter.call_args.kwargs["headers"],
+            {"x-breakspan-demo": "langchain-gemini"},
+        )
         self.assertEqual(exporter.call_args.kwargs["timeout"], 2)
         exporter.return_value.shutdown.assert_called_once()
 

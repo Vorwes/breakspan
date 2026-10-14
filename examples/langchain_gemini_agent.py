@@ -218,7 +218,14 @@ def collected_telemetry():
 
 
 def export_trace(collector, endpoint):
-    exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True, headers={}, timeout=2)
+    # An empty header map falls back to OTEL_* auth headers in this SDK.
+    # One harmless explicit header prevents that fallback.
+    exporter = OTLPSpanExporter(
+        endpoint=endpoint,
+        insecure=True,
+        headers={"x-breakspan-demo": "langchain-gemini"},
+        timeout=2,
+    )
     try:
         return (
             exporter.export(collector.get_finished_spans()) == SpanExportResult.SUCCESS
