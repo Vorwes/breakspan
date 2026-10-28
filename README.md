@@ -18,6 +18,7 @@ Implemented today:
 - Representative GenAI agent/model/tool classification.
 - Bounded in-memory traces and arrival-order-independent execution trees.
 - A headless CLI that prints provisional snapshots; a TUI crate is reserved.
+- Opt-in bounded raw OTLP recordings and offline execution-tree loading.
 
 There is **no comparison, failure diagnosis or replay yet**.
 
@@ -51,6 +52,43 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 These variables configure an exporter; they do not instrument an agent by
 themselves. Framework-specific instrumentation remains outside Breakspan.
 There is no OTLP/HTTP endpoint on port 4318.
+
+### Record and inspect a trace
+
+Create a local `recordings` directory, then:
+
+```sh
+breakspan listen --record recordings/run.bspan
+# Stop the receiver with Ctrl-C, then inspect the recording:
+breakspan show recordings/run.bspan
+# Or inspect the repository's synthetic fixture without running a receiver:
+cargo run -p breakspan-cli -- show crates/breakspan-otlp/tests/fixtures/synthetic.bspan
+```
+
+Recording refuses to overwrite an existing file. Use `--force` with `--record`
+to explicitly truncate it. `--max-recording-bytes BYTES` sets a total file cap
+for recording or loading (default 256 MiB, minimum 8 bytes). On `listen`, this
+option and `--force` require `--record`. The recording cap is independent of
+the in-memory span/byte limits; recordings include exports before normalization,
+including spans later rejected by validation or memory capacity.
+
+`show` loads through the same normalizer into bounded memory and prints the
+stored execution-tree snapshots once. It accepts `--max-spans` (default 10,000);
+the 64 MiB storage-accounting limit still applies. Rejected spans are reported
+on stderr. A damaged header fails without printing trees. If corruption,
+truncation or the loading byte cap occurs after complete decoded frames, `show`
+prints the valid prefix, warns on stderr and exits nonzero. An empty recording
+with a valid header is accepted.
+
+If recording reaches its cap or a write fails, the receiver warns once and
+disables recording; live ingestion continues. There is no separate recording
+buffer or queue to flush. Successful writes do not guarantee `fsync` durability.
+
+**Recordings contain raw, potentially sensitive telemetry without redaction,**
+including fields not shown in trees. They are not byte-for-byte network captures:
+unknown protobuf wire fields are not preserved. Never commit captured recordings,
+even if they appear harmless. Root `/recordings/` is ignored for local use;
+only the intentionally synthetic fixture belongs in Git.
 
 ### Reproducible external instrumentation demo
 
@@ -167,10 +205,11 @@ breakspan listen --help
 ```
 
 Only loopback binds are allowed by the CLI. Ctrl-C requests graceful shutdown;
-all traces disappear when the process exits. Limits default to 10,000 spans and
-64 MiB of conservative storage accounting (not a hard RSS limit). At capacity,
-new spans are rejected; there is no automatic eviction. Duplicate span IDs use
-the last accepted export. Restart to clear the store.
+in-memory traces disappear when the process exits unless explicitly reloaded
+from an opt-in recording. Limits default to 10,000 spans and 64 MiB of conservative
+storage accounting (not a hard RSS limit). At capacity, new spans are rejected;
+there is no automatic eviction. Duplicate span IDs use the last accepted export.
+Restart to clear the in-memory store.
 
 The receiver limits decoded messages to 1 MiB, exports to 1,024 spans, attribute
 nesting to 16 levels and normalized exports to a 16 MiB accounting budget.
@@ -179,9 +218,10 @@ oversize/invalid protobuf messages fail at the gRPC boundary. Span names are
 escaped for terminal controls and truncated to 200 characters in output.
 
 **Telemetry can contain sensitive prompts, tool arguments and credentials.**
-Breakspan keeps received attributes in memory without automatic redaction. Use
-your instrumentation's content-recording controls, do not commit private traces,
-and do not expose this unauthenticated receiver beyond the local machine.
+Breakspan keeps received attributes in memory, and in opt-in recordings, without
+automatic redaction. Use your instrumentation's content-recording controls,
+never commit captures, and do not expose this unauthenticated receiver beyond
+the local machine.
 
 ## Development
 
@@ -193,6 +233,8 @@ cargo build --workspace
 uv run examples/langchain_gemini_agent.py --self-test
 # Run only the real loopback gRPC integration suite:
 cargo test -p breakspan-otlp --test grpc_ingestion
+# Regenerate only the intentionally synthetic recording fixture:
+cargo test -p breakspan-otlp --test recording regenerate_synthetic_fixture -- --ignored --exact --nocapture
 ```
 
 See [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md),
@@ -205,7 +247,7 @@ Rust OpenTelemetry trace APIs are Beta; GenAI semantic conventions are
 Development and can change. The implemented operation mapping and authoritative
 sources are documented in [architecture](docs/architecture.md#interoperability-and-dependency-decisions).
 
-No persistence, full TUI/GUI, span-event/link analysis, run comparison,
+No database-backed storage, full TUI/GUI, span-event/link analysis, run comparison,
 first-divergence detection, semantic-loop detection, behavioral assertions,
 context profiling or replay is implemented. OpenAI Agents SDK, LangGraph and
 other harness integrations depend on those systems emitting compatible spans;

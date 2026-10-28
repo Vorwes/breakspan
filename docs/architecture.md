@@ -31,9 +31,9 @@ breakspan-store ── bounded memory, trace-ID grouping, snapshot queries
 | Crate | Owns | Must not own |
 | --- | --- | --- |
 | `breakspan-core` | Canonical IDs, spans, timing, metadata, traces and tree rendering | OTel/protobuf/tonic, runtimes, databases, frontend types |
-| `breakspan-otlp` | TraceService server, wire-input validation and semantic-convention mapping | Agent loops, storage implementation, UI logic |
+| `breakspan-otlp` | TraceService server, recording/loading format, wire-input validation and semantic-convention mapping | Agent loops, storage implementation, UI logic |
 | `breakspan-store` | In-memory retention, capacity accounting, snapshot queries and change notification | Transport decoding, GenAI interpretation |
-| `breakspan-cli` | Executable, flags, loopback binding, shutdown and output orchestration | Normalization or domain debugger logic |
+| `breakspan-cli` | Executable, flags, loopback binding, recording/loading orchestration, shutdown and text output | Protobuf types, normalization or domain debugger logic |
 | `breakspan-tui` | Reserved interactive frontend crate | Implementation in this milestone, debugger business logic |
 
 Core is dependency-free. OTLP depends on core/store; store depends on core and
@@ -64,10 +64,12 @@ frontend/plugin/query trait hierarchy is introduced now.
   framework-specific run ID or complete-run lifecycle is inferred.
 
 OTel types end inside `breakspan-otlp`, including its tests. The public receiver
-API accepts a Tokio listener, the memory store, and a shutdown future; it exposes
-no protobuf or tonic types. Neither OTLP nor any database schema should dictate
-the debugger's domain API. This insulation matters because telemetry conventions
-and transport APIs evolve independently of trajectory analysis.
+API accepts a Tokio listener, the memory store, an optional `Recorder`, and a
+shutdown future; it exposes no protobuf or tonic types. Recording creation and
+loading likewise expose only paths, options, the memory store and bounded reports.
+Neither OTLP nor any database schema should dictate the debugger's domain API.
+This insulation matters because telemetry conventions and transport APIs evolve
+independently of trajectory analysis.
 
 This model is intentionally incomplete: span events, links, wire span-kind/flags,
 trace state, resource entities and dropped-field counts are not normalized yet.
@@ -127,12 +129,82 @@ and operations are retained. Valid siblings survive a rejected span, with
 `rejected_spans` in an OTLP partial-success response. Decode errors/oversize
 messages fail at tonic's protocol boundary. Errors never echo telemetry content.
 Capacity rejection does not evict existing data; replacements remain possible if
-they fit. Restarting clears everything. SQLite is not needed for this slice.
+they fit. Restarting clears in-memory state; recordings must be explicitly loaded.
+SQLite is not needed for this slice.
 
 The CLI rejects non-loopback bind addresses. The library expects callers to
 supply a local listener. There is no TLS, authentication or redaction. Sensitive
 content should be disabled at the emitter; users must keep private traces out of
 Git. This is a local development backend, not a production security perimeter.
+
+## Trace recordings and offline loading
+
+Recordings are an opt-in TRACE prerequisite, not a database, comparison engine
+or replay feature. `breakspan-otlp` owns encoding, framing, file I/O and loading;
+protobuf remains inside that crate. The CLI only wires `listen --record FILE`
+and `show FILE`, obtains store snapshots and renders them through the same
+blocking-pool output helper used by live snapshots. `show` prints once after
+loading, not after each export.
+
+The version-1 `.bspan` format is:
+
+```text
+8-byte header: b"BRKSPAN\x01" (seven magic bytes, then version 1)
+repeated frames:
+    u32 little-endian payload length
+    that many bytes of prost-encoded OTLP ExportTraceServiceRequest
+```
+
+Each payload is at most 1 MiB. A zero-length payload is a valid empty protobuf
+export. Recording and loading default to a 256 MiB total byte cap, including
+the header and four-byte frame lengths. `--max-recording-bytes` can change it;
+values below the eight-byte header size are rejected. On `listen`, the option
+requires `--record`. These file limits are distinct from the default 10,000-span
+and 64 MiB conservative in-memory limits. Loading uses the normal store limits,
+not unbounded accumulation; snapshots, decoding and rendering still add overhead.
+
+The receiver records decoded exports before normalization, so rejected spans,
+events, links and other known protobuf fields absent from the canonical model
+can remain in recordings. This is not a byte-exact network capture: prost does
+not preserve unknown wire fields. Offline loading reuses the existing normalizer
+and store; validation/capacity rejection counts are reported without exposing
+telemetry. Recorded exports are serialized through recording, normalization and
+ingestion to preserve file/ingest order and last-accepted-copy-wins semantics.
+One blocking-pool worker performs recording, normalization and store ingestion;
+the recorder's synchronous mutex preserves this ordering through ingestion.
+The ordering lock is acquired only on the blocking worker; no async mutex is
+held across an await.
+Once started, this blocking work completes ingestion even if its RPC is canceled.
+
+The recorder creates files exclusively by default. `--force` requires `--record`
+and explicitly truncates an existing file. Each frame is synchronously written
+with unbuffered `std::fs::File::write_all` on a blocking-pool task before
+normalization. There is no separate recording buffer or queue to flush at
+shutdown; the runtime waits for started blocking work before it exits. Disk
+latency adds to recording-enabled export latency. The first cap or I/O failure
+is sticky: recording is disabled, the CLI warns once and stops monitoring it,
+and live ingestion continues. Failure can leave an incomplete trailing frame.
+Successful writes do not imply `fsync`, power-loss durability or crash consistency.
+
+Loading checks the cap incrementally, retaining a valid prefix even when the
+whole file exceeds the cap. An invalid/truncated header, unsupported version,
+or frame failure before any complete decoded frame is an error with no tree
+output. A header-only file is valid and empty. After at least one complete
+decoded frame, an invalid/oversize/truncated frame, read failure or cap returns
+the loaded prefix with a warning. The CLI prints its snapshots, warns on stderr
+and exits nonzero, so partial output cannot masquerade as a complete recording.
+Errors and warnings do not echo telemetry content.
+
+Recording is raw and unredacted, potentially including prompts, arguments,
+credentials and fields not shown in trees. Startup warns when it is enabled;
+in-memory-only startup wording is used only when recording is disabled.
+Never commit captured recordings. Root `/recordings/` is ignored for local
+captures; the only committed capture is the intentionally synthetic
+`crates/breakspan-otlp/tests/fixtures/synthetic.bspan`. Regenerate it with:
+
+```sh
+cargo test -p breakspan-otlp --test recording regenerate_synthetic_fixture -- --ignored --exact --nocapture
+```
 
 ## Interoperability and dependency decisions
 
@@ -169,20 +241,26 @@ private helpers isolate operation classification, status conversion and optional
 scope conversion. Budgeted copies retain their charge order, and the export-level
 loop restores the budget for rejected spans before processing siblings.
 
-Dependencies are actively maintained upstream libraries with concrete roles:
+Dependencies use upstream libraries with concrete roles:
 - `opentelemetry-proto`: upstream generated messages and service; only `trace`
   and `gen-tonic` features enabled. It transitively brings the OTel API/SDK, but
   Breakspan does not instrument itself or directly depend on an exporter/SDK.
   No local protobuf generation, build script or `protoc` installation needed.
+- `prost` 0.14: direct encoding/decoding of the existing generated OTLP messages
+  for recording frames; no new protobuf schema or generation step. This matches
+  upstream OTLP's existing prost 0.14 requirement and uses only the `std` feature.
+  Its [upstream README](https://github.com/tokio-rs/prost#readme) describes the
+  project as passively maintained, not actively maintained.
 - `tonic`: gRPC transport/server matching upstream generated types.
 - `tokio`: networking, process signals, mutex/watch notification and task runtime.
 - `tokio-stream`: listener-to-stream adapter required by tonic's incoming API.
 - `clap`: typed command/options parsing, validation and generated help.
 
-No serialization crate, database, TUI library, general error library, LLM client
-or semantic-convention constant crate is added. Small library errors implement
-standard Error/Display without an extra dependency. Cargo.lock pins the application;
-stable Rust is used (locally validated with 1.99.0). No lower MSRV is promised yet.
+No general-purpose serialization crate, database, TUI library, general error
+library, LLM client or semantic-convention constant crate is added. Small library
+errors implement standard Error/Display without an extra dependency. Cargo.lock
+pins the application; stable Rust is used (locally validated with 1.99.0).
+No lower MSRV is promised yet.
 
 ## Validation and future direction
 
