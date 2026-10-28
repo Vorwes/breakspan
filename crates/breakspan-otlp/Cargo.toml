@@ -9,6 +9,7 @@ repository.workspace = true
 breakspan-core.workspace = true
 breakspan-store.workspace = true
 opentelemetry-proto.workspace = true
+prost.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
