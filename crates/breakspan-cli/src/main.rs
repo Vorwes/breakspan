@@ -34,7 +34,7 @@ enum Command {
         /// Save raw OTLP exports, which may contain sensitive data.
         #[arg(long, value_name = "FILE")]
         record: Option<PathBuf>,
-        /// Truncate an existing recording instead of refusing to overwrite it.
+        /// Replace an existing recording instead of refusing to overwrite it.
         #[arg(long, requires = "record")]
         force: bool,
         /// Maximum recording size, including the header and frame lengths.
@@ -52,8 +52,17 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> CliResult<ExitCode> {
-    match Cli::parse().command {
+async fn main() -> ExitCode {
+    // Returning the error from main would print its Debug form instead of the
+    // reviewed, telemetry-free Display text.
+    run(Cli::parse()).await.unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        ExitCode::FAILURE
+    })
+}
+
+async fn run(cli: Cli) -> CliResult<ExitCode> {
+    match cli.command {
         Command::Listen {
             bind,
             max_spans,
