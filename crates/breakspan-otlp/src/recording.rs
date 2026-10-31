@@ -1,6 +1,6 @@
 //! Versioned protobuf export recordings. All filesystem work stays on blocking
 //! workers; no transport types escape this crate.
-use crate::{MAX_MESSAGE_BYTES, ingest_export};
+use crate::{MAX_MESSAGE_BYTES, ingest_export, ingest_normalized, normalize};
 use breakspan_store::MemoryStore;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use prost::Message;
@@ -8,20 +8,22 @@ use std::{
     fmt,
     fs::{File, OpenOptions},
     io::{self, Read, Write},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
 
-const MAGIC: &[u8; 7] = b"BRKSPAN";
+/// Seven magic bytes followed by the format version byte.
 const HEADER: &[u8; 8] = b"BRKSPAN\x01";
+const VERSION_INDEX: usize = 7;
 
 /// Total on-disk bytes, including the header and frame lengths.
 pub const DEFAULT_MAX_RECORDING_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RecordingOptions {
-    /// Explicitly truncate an existing file instead of refusing to overwrite it.
+    /// Explicitly replace an existing file instead of refusing to overwrite it.
     pub force: bool,
     pub max_bytes: u64,
 }
@@ -47,14 +49,14 @@ impl std::error::Error for RecordingError {}
 /// Clones share the file, ordering lock and sticky failure notification.
 #[derive(Clone)]
 pub struct Recorder {
-    state: Arc<Mutex<RecordingState>>,
+    // None once recording has failed; live ingestion still takes the lock.
+    writer: Arc<Mutex<Option<Writer>>>,
     failure: watch::Sender<Option<RecordingError>>,
 }
-struct RecordingState {
-    file: Option<File>,
+struct Writer {
+    file: File,
     bytes: u64,
     max_bytes: u64,
-    buffer: Vec<u8>,
 }
 impl Recorder {
     /// Create a new recording on a blocking worker. Existing files are untouched
@@ -70,13 +72,18 @@ impl Recorder {
                     "recording size cap must be at least 8 bytes",
                 ));
             }
-            let mut open = OpenOptions::new();
-            open.write(true);
+            // Force replaces rather than truncates: removing the old entry first
+            // means exclusive creation applies the private mode below to a new
+            // file and never follows a symlink planted at the destination.
             if options.force {
-                open.create(true).truncate(true);
-            } else {
-                open.create_new(true);
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(RecordingError("could not replace recording file")),
+                }
             }
+            let mut open = OpenOptions::new();
+            open.write(true).create_new(true);
             // Private captures should not acquire group/world readability through
             // a permissive umask. Windows uses the containing directory's ACL.
             #[cfg(unix)]
@@ -84,23 +91,27 @@ impl Recorder {
                 use std::os::unix::fs::OpenOptionsExt;
                 open.mode(0o600);
             }
-            let mut file = open.open(path).map_err(|error| {
+            let mut file = open.open(&path).map_err(|error| {
                 if error.kind() == io::ErrorKind::AlreadyExists {
                     RecordingError("recording already exists; use --force to overwrite")
                 } else {
                     RecordingError("could not create recording file")
                 }
             })?;
-            file.write_all(HEADER)
-                .map_err(|_| RecordingError("could not write recording header"))?;
+            if file.write_all(HEADER).is_err() {
+                // This call created the file, so removing it discards no user
+                // data, and a retry without --force is not refused.
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                return Err(RecordingError("could not write recording header"));
+            }
             let (failure, _) = watch::channel(None);
             Ok(Self {
-                state: Arc::new(Mutex::new(RecordingState {
-                    file: Some(file),
+                writer: Arc::new(Mutex::new(Some(Writer {
+                    file,
                     bytes: HEADER.len() as u64,
                     max_bytes: options.max_bytes,
-                    buffer: Vec::new(),
-                })),
+                }))),
                 failure,
             })
         })
@@ -111,40 +122,43 @@ impl Recorder {
     /// Wait for the first recording failure, including one that already occurred.
     /// Recording stays disabled after failure; live ingestion is unaffected.
     pub async fn failed(&self) -> RecordingError {
-        let mut failure = self.failure.subscribe();
-        loop {
-            if let Some(error) = *failure.borrow_and_update() {
-                return error;
-            }
-            if failure.changed().await.is_err() {
-                // This handle owns a sender, so closure is impossible while this
-                // future is alive. Remain pending rather than spinning if closed.
-                return std::future::pending().await;
-            }
+        let error = self
+            .failure
+            .subscribe()
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|failure| *failure);
+        match error {
+            Some(error) => error,
+            // This handle owns the sender, so the channel cannot close here.
+            None => std::future::pending().await,
         }
     }
 
-    // Called only by the receiver's blocking worker. Hold the ordering lock
-    // through ingestion: releasing it after writing would let concurrent exports
-    // apply replacements or exhaust capacity in a different order than replay.
+    // Called only by the receiver's blocking worker. Encoding and normalization
+    // are independent per export and run outside the lock. The lock is held from
+    // the frame write through store ingestion: releasing it in between would let
+    // concurrent exports apply replacements or exhaust capacity in a different
+    // order than replay.
     pub(crate) fn ingest(&self, request: ExportTraceServiceRequest, store: &MemoryStore) -> u64 {
-        match self.state.lock() {
-            Ok(mut state) => {
-                if state.file.is_some()
-                    && let Err(error) = state.append(&request)
-                {
-                    state.file = None;
-                    self.fail(error);
-                }
-                let rejected = ingest_export(request, store);
-                drop(state);
-                rejected
-            }
-            Err(_) => {
-                self.fail(RecordingError("recording worker failed; recording stopped"));
-                ingest_export(request, store)
-            }
+        // Read the flag first so the watch read guard is not held while encoding.
+        let recording = self.failure.borrow().is_none();
+        let frame = recording.then(|| encode_frame(&request));
+        let parsed = normalize::normalize(request);
+        let Ok(mut writer) = self.writer.lock() else {
+            self.fail(RecordingError("recording worker failed; recording stopped"));
+            return ingest_normalized(parsed, store);
+        };
+        if let (Some(frame), Some(active)) = (frame, writer.as_mut())
+            && let Err(error) = frame.and_then(|frame| active.append(&frame))
+        {
+            *writer = None;
+            self.fail(error);
         }
+        let rejected = ingest_normalized(parsed, store);
+        drop(writer);
+        rejected
     }
 
     fn fail(&self, error: RecordingError) {
@@ -158,29 +172,31 @@ impl Recorder {
         });
     }
 }
-impl RecordingState {
-    fn append(&mut self, request: &ExportTraceServiceRequest) -> Result<(), RecordingError> {
-        let len = request.encoded_len();
-        if len > MAX_MESSAGE_BYTES {
-            return Err(RecordingError("recording frame exceeds the 1 MiB limit"));
-        }
-        let next = self.bytes + 4 + len as u64;
+// The length prefix and payload share one buffer so each frame is one write.
+fn encode_frame(request: &ExportTraceServiceRequest) -> Result<Vec<u8>, RecordingError> {
+    let len = request.encoded_len();
+    if len > MAX_MESSAGE_BYTES {
+        return Err(RecordingError("recording frame exceeds the 1 MiB limit"));
+    }
+    let mut frame = Vec::with_capacity(4 + len);
+    frame.extend_from_slice(&(len as u32).to_le_bytes());
+    request
+        .encode(&mut frame)
+        .map_err(|_| RecordingError("could not encode recording frame; recording stopped"))?;
+    Ok(frame)
+}
+
+impl Writer {
+    fn append(&mut self, frame: &[u8]) -> Result<(), RecordingError> {
+        let next = self.bytes + frame.len() as u64;
         if next > self.max_bytes {
             return Err(RecordingError(
                 "recording size cap reached; recording stopped",
             ));
         }
-        self.buffer.clear();
-        request
-            .encode(&mut self.buffer)
-            .map_err(|_| RecordingError("could not encode recording frame; recording stopped"))?;
-        if let Some(file) = &mut self.file {
-            file.write_all(&(len as u32).to_le_bytes())
-                .and_then(|()| file.write_all(&self.buffer))
-                .map_err(|_| {
-                    RecordingError("could not write recording frame; recording stopped")
-                })?;
-        }
+        self.file
+            .write_all(frame)
+            .map_err(|_| RecordingError("could not write recording frame; recording stopped"))?;
         self.bytes = next;
         Ok(())
     }
@@ -247,40 +263,49 @@ pub async fn load(
                 "could not read header"
             })
         })?;
-        if &header[..MAGIC.len()] != MAGIC {
+        if header[..VERSION_INDEX] != HEADER[..VERSION_INDEX] {
             return Err(LoadError::header("bad magic"));
         }
-        if header[MAGIC.len()] != HEADER[MAGIC.len()] {
+        if header[VERSION_INDEX] != HEADER[VERSION_INDEX] {
             return Err(LoadError::header("unknown format version"));
         }
-        let mut report = LoadReport::default();
-        let mut bytes = HEADER.len() as u64;
-        let mut payload = Vec::new();
-        loop {
-            match read_frame(
-                &mut file,
-                &mut payload,
-                &mut bytes,
-                max_bytes,
-                report.frames + 1,
-            ) {
-                Ok(false) => return Ok(report),
-                Ok(true) => {}
-                Err(error) => return partial_or_error(report, error),
-            }
-            let request = match ExportTraceServiceRequest::decode(payload.as_slice()) {
-                Ok(request) => request,
-                Err(_) => {
-                    let error = LoadError::frame("undecodable protobuf", report.frames + 1);
-                    return partial_or_error(report, error);
-                }
-            };
-            report.rejected_spans += ingest_export(request, &store);
-            report.frames += 1;
-        }
+        replay(&mut file, max_bytes, |request| {
+            ingest_export(request, &store)
+        })
     })
     .await
     .map_err(|_| LoadError::header("loading task failed"))?
+}
+
+// Frames after the header. A panic while ingesting one frame is reported as
+// that frame's failure so the already-loaded prefix is not discarded.
+fn replay(
+    file: &mut impl Read,
+    max_bytes: u64,
+    mut ingest: impl FnMut(ExportTraceServiceRequest) -> u64,
+) -> Result<LoadReport, LoadError> {
+    let mut report = LoadReport::default();
+    let mut bytes = HEADER.len() as u64;
+    let mut payload = Vec::new();
+    loop {
+        let frame = report.frames + 1;
+        match read_frame(file, &mut payload, &mut bytes, max_bytes, frame) {
+            Ok(false) => return Ok(report),
+            Ok(true) => {}
+            Err(error) => return partial_or_error(report, error),
+        }
+        let Ok(request) = ExportTraceServiceRequest::decode(payload.as_slice()) else {
+            return partial_or_error(report, LoadError::frame("undecodable protobuf", frame));
+        };
+        match catch_unwind(AssertUnwindSafe(|| ingest(request))) {
+            Ok(rejected) => report.rejected_spans += rejected,
+            Err(_) => {
+                let error = LoadError::frame("could not ingest frame", frame);
+                return partial_or_error(report, error);
+            }
+        }
+        report.frames += 1;
+    }
 }
 
 fn partial_or_error(mut report: LoadReport, error: LoadError) -> Result<LoadReport, LoadError> {
@@ -295,7 +320,7 @@ fn partial_or_error(mut report: LoadReport, error: LoadError) -> Result<LoadRepo
 // Check length and the cumulative budget before resizing or decoding. An initial
 // read distinguishes clean EOF from a partially written length prefix.
 fn read_frame(
-    file: &mut File,
+    file: &mut impl Read,
     payload: &mut Vec<u8>,
     bytes: &mut u64,
     max_bytes: u64,
@@ -388,12 +413,11 @@ mod tests {
             let file = File::open(&path).unwrap();
             let (failure, _) = watch::channel(None);
             let recorder = Recorder {
-                state: Arc::new(Mutex::new(RecordingState {
-                    file: Some(file),
+                writer: Arc::new(Mutex::new(Some(Writer {
+                    file,
                     bytes: HEADER.len() as u64,
                     max_bytes: DEFAULT_MAX_RECORDING_BYTES,
-                    buffer: Vec::new(),
-                })),
+                }))),
                 failure,
             };
             (TestFile(path), recorder)
@@ -470,5 +494,38 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn ingest_panic_keeps_the_loaded_prefix_as_a_frame_warning() {
+        let request = ExportTraceServiceRequest::default();
+        let mut frames = Vec::new();
+        for _ in 0..3 {
+            frames.extend(encode_frame(&request).unwrap());
+        }
+        let mut calls = 0;
+        let report = replay(&mut frames.as_slice(), DEFAULT_MAX_RECORDING_BYTES, |_| {
+            calls += 1;
+            assert!(calls != 2, "synthetic ingestion fault");
+            1
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(report.frames, 1);
+        assert_eq!(report.rejected_spans, 1);
+        assert_eq!(
+            report.warning,
+            Some(LoadError::frame("could not ingest frame", 2))
+        );
+    }
+
+    #[test]
+    fn ingest_panic_before_any_frame_is_an_error() {
+        let frame = encode_frame(&ExportTraceServiceRequest::default()).unwrap();
+        let error = replay(&mut frame.as_slice(), DEFAULT_MAX_RECORDING_BYTES, |_| {
+            panic!("synthetic ingestion fault")
+        })
+        .unwrap_err();
+        assert_eq!(error, LoadError::frame("could not ingest frame", 1));
     }
 }

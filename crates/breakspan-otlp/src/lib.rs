@@ -43,8 +43,9 @@ impl TraceService for Receiver {
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
         // Recording, normalization and ingestion complete together on a blocking
-        // worker, even if the RPC is cancelled. A recorder serializes this whole
-        // operation so replay preserves live last-export-wins/capacity decisions.
+        // worker, even if the RPC is cancelled. A recorder serializes the frame
+        // write and store ingestion so replay preserves live last-export-wins and
+        // capacity decisions; encoding and normalization run concurrently.
         let store = self.store.clone();
         let recorder = self.recorder.clone();
         let rejected = tokio::task::spawn_blocking(move || {
@@ -71,7 +72,10 @@ impl TraceService for Receiver {
 // mutex critical sections contain no I/O, and block_on never blocks a network
 // worker. No transport-specific validation/normalization fork exists.
 fn ingest_export(request: ExportTraceServiceRequest, store: &MemoryStore) -> u64 {
-    let parsed = normalize::normalize(request);
+    ingest_normalized(normalize::normalize(request), store)
+}
+
+fn ingest_normalized(parsed: normalize::NormalizedExport, store: &MemoryStore) -> u64 {
     parsed.rejected as u64
         + tokio::runtime::Handle::current().block_on(store.ingest(parsed.spans)) as u64
 }

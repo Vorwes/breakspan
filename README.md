@@ -66,7 +66,8 @@ cargo run -p breakspan-cli -- show crates/breakspan-otlp/tests/fixtures/syntheti
 ```
 
 Recording refuses to overwrite an existing file. Use `--force` with `--record`
-to explicitly truncate it. `--max-recording-bytes BYTES` sets a total file cap
+to explicitly replace it with a new private file (`0600` on Unix; an existing
+symlink is replaced, not followed). `--max-recording-bytes BYTES` sets a total file cap
 for recording or loading (default 256 MiB, minimum 8 bytes). On `listen`, this
 option and `--force` require `--record`. The recording cap is independent of
 the in-memory span/byte limits; recordings include exports before normalization,

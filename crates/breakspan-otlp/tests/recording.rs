@@ -663,7 +663,7 @@ async fn header_only_recording_cap_allows_live_exports_but_records_no_frames() {
 }
 
 #[tokio::test]
-async fn recorder_refuses_overwrite_and_force_truncates_only_when_explicit() {
+async fn recorder_refuses_overwrite_and_force_replaces_only_when_explicit() {
     let temp = TempDir::new();
     let path = temp.file(&format!("{PRIVATE_CONTENT}.bspan"));
     let original = recording(&[request(vec![span(1, None, "chat", "preserved")])]);
@@ -674,7 +674,7 @@ async fn recorder_refuses_overwrite_and_force_truncates_only_when_explicit() {
         .unwrap();
     assert_safe(error);
     assert_eq!(fs::read(&path).unwrap(), original);
-    // Reject an invalid cap before opening/truncating an existing destination.
+    // Reject an invalid cap before replacing an existing destination.
     let error = Recorder::create(
         &path,
         RecordingOptions {
@@ -701,6 +701,35 @@ async fn recorder_refuses_overwrite_and_force_truncates_only_when_explicit() {
     let report = load(&path, MemoryStore::default(), 8).await.unwrap();
     assert_eq!(report.frames, 0);
     assert!(report.warning.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn force_replaces_permissive_files_and_symlinks_with_a_private_file() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let temp = TempDir::new();
+    let force = RecordingOptions {
+        force: true,
+        ..RecordingOptions::default()
+    };
+    let path = temp.file("permissive.bspan");
+    fs::write(&path, PRIVATE_CONTENT).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    drop(Recorder::create(&path, force).await.unwrap());
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(fs::read(&path).unwrap(), HEADER);
+
+    let target = temp.file("shared-target");
+    fs::write(&target, PRIVATE_CONTENT).unwrap();
+    let link = temp.file("link.bspan");
+    symlink(&target, &link).unwrap();
+    drop(Recorder::create(&link, force).await.unwrap());
+    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_file());
+    assert_eq!(fs::read(&link).unwrap(), HEADER);
+    assert_eq!(fs::read_to_string(&target).unwrap(), PRIVATE_CONTENT);
 }
 
 // A raw client lets malformed protobuf reach tonic's decoder rather than making

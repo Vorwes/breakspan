@@ -168,18 +168,21 @@ events, links and other known protobuf fields absent from the canonical model
 can remain in recordings. This is not a byte-exact network capture: prost does
 not preserve unknown wire fields. Offline loading reuses the existing normalizer
 and store; validation/capacity rejection counts are reported without exposing
-telemetry. Recorded exports are serialized through recording, normalization and
-ingestion to preserve file/ingest order and last-accepted-copy-wins semantics.
-One blocking-pool worker performs recording, normalization and store ingestion;
-the recorder's synchronous mutex preserves this ordering through ingestion.
+telemetry. One blocking-pool worker per export encodes the frame, normalizes and
+ingests. Encoding and normalization run concurrently across exports; the
+recorder's synchronous mutex covers only the frame write and store ingestion,
+which preserves file/ingest order and last-accepted-copy-wins semantics.
 The ordering lock is acquired only on the blocking worker; no async mutex is
 held across an await.
 Once started, this blocking work completes ingestion even if its RPC is canceled.
 
 The recorder creates files exclusively by default. `--force` requires `--record`
-and explicitly truncates an existing file. Each frame is synchronously written
-with unbuffered `std::fs::File::write_all` on a blocking-pool task before
-normalization. There is no separate recording buffer or queue to flush at
+and explicitly replaces an existing file: the old directory entry is removed and
+a new file is created exclusively (mode `0600` on Unix), so a permissive existing
+file or a symlink at the destination is never reused or followed. If the header
+write fails, the recorder removes the file it just created. Each frame, length
+prefix included, is written with one unbuffered `std::fs::File::write_all` on a
+blocking-pool task. There is no separate recording buffer or queue to flush at
 shutdown; the runtime waits for started blocking work before it exits. Disk
 latency adds to recording-enabled export latency. The first cap or I/O failure
 is sticky: recording is disabled, the CLI warns once and stops monitoring it,
@@ -190,8 +193,8 @@ Loading checks the cap incrementally, retaining a valid prefix even when the
 whole file exceeds the cap. An invalid/truncated header, unsupported version,
 or frame failure before any complete decoded frame is an error with no tree
 output. A header-only file is valid and empty. After at least one complete
-decoded frame, an invalid/oversize/truncated frame, read failure or cap returns
-the loaded prefix with a warning. The CLI prints its snapshots, warns on stderr
+decoded frame, an invalid/oversize/truncated frame, read failure, cap or a panic
+while ingesting a frame returns the loaded prefix with a warning. The CLI prints its snapshots, warns on stderr
 and exits nonzero, so partial output cannot masquerade as a complete recording.
 Errors and warnings do not echo telemetry content.
 
