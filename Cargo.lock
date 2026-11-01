@@ -146,6 +146,7 @@ dependencies = [
  "breakspan-core",
  "breakspan-store",
  "opentelemetry-proto",
+ "prost",
  "tokio",
  "tokio-stream",
  "tonic",

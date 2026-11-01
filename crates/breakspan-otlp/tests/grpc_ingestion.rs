@@ -27,9 +27,14 @@ impl TestReceiver {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, stopped) = oneshot::channel();
-        let task = tokio::spawn(breakspan_otlp::serve(listener, store.clone(), async {
-            let _ = stopped.await;
-        }));
+        let task = tokio::spawn(breakspan_otlp::serve(
+            listener,
+            store.clone(),
+            None,
+            async {
+                let _ = stopped.await;
+            },
+        ));
         let client = timeout(
             Duration::from_secs(5),
             TraceServiceClient::connect(format!("http://{address}")),

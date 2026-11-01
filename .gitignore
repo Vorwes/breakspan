@@ -1,4 +1,5 @@
 /target/
+/recordings/
 *.db
 *.db-shm
 *.db-wal

@@ -2,6 +2,12 @@
 //! protobuf or tonic types; the canonical spans are stored in breakspan-store.
 
 mod normalize;
+mod recording;
+
+pub use recording::{
+    DEFAULT_MAX_RECORDING_BYTES, LoadError, LoadReport, Recorder, RecordingError, RecordingOptions,
+    load,
+};
 
 use breakspan_store::MemoryStore;
 use opentelemetry_proto::tonic::collector::trace::v1::{
@@ -27,6 +33,7 @@ impl std::error::Error for ReceiverError {}
 
 struct Receiver {
     store: MemoryStore,
+    recorder: Option<Recorder>,
 }
 
 #[tonic::async_trait]
@@ -35,15 +42,23 @@ impl TraceService for Receiver {
         &self,
         request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
-        // Normalization may traverse lots of metadata; keep that CPU work off
-        // network workers. Limit concurrent requests at the server below.
-        let parsed =
-            tokio::task::spawn_blocking(move || normalize::normalize(request.into_inner()))
-                .await
-                .map_err(|_| Status::internal("normalization task failed"))?;
-        let rejected = parsed.rejected + self.store.ingest(parsed.spans).await as i64;
+        // Recording, normalization and ingestion complete together on a blocking
+        // worker, even if the RPC is cancelled. A recorder serializes the frame
+        // write and store ingestion so replay preserves live last-export-wins and
+        // capacity decisions; encoding and normalization run concurrently.
+        let store = self.store.clone();
+        let recorder = self.recorder.clone();
+        let rejected = tokio::task::spawn_blocking(move || {
+            let request = request.into_inner();
+            match recorder {
+                Some(recorder) => recorder.ingest(request, &store),
+                None => ingest_export(request, &store),
+            }
+        })
+        .await
+        .map_err(|_| Status::internal("ingestion task failed"))?;
         let partial_success = (rejected > 0).then(|| ExportTracePartialSuccess {
-            rejected_spans: rejected,
+            rejected_spans: rejected as i64,
             // No untrusted content is echoed into logs or protocol errors.
             error_message: "spans rejected: invalid IDs/timing, attribute depth, export budget or store capacity".into(),
         });
@@ -53,15 +68,28 @@ impl TraceService for Receiver {
     }
 }
 
+// Called only on blocking workers by both gRPC and recording loading. Store
+// mutex critical sections contain no I/O, and block_on never blocks a network
+// worker. No transport-specific validation/normalization fork exists.
+fn ingest_export(request: ExportTraceServiceRequest, store: &MemoryStore) -> u64 {
+    ingest_normalized(normalize::normalize(request), store)
+}
+
+fn ingest_normalized(parsed: normalize::NormalizedExport, store: &MemoryStore) -> u64 {
+    parsed.rejected as u64
+        + tokio::runtime::Handle::current().block_on(store.ingest(parsed.spans)) as u64
+}
+
 /// Serve a pre-bound local listener until shutdown resolves. Binding belongs to
 /// the caller so CLI startup and integration tests can discover the actual port.
 pub async fn serve(
     listener: TcpListener,
     store: MemoryStore,
+    recorder: Option<Recorder>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), ReceiverError> {
-    let service =
-        TraceServiceServer::new(Receiver { store }).max_decoding_message_size(MAX_MESSAGE_BYTES);
+    let service = TraceServiceServer::new(Receiver { store, recorder })
+        .max_decoding_message_size(MAX_MESSAGE_BYTES);
     Server::builder()
         .concurrency_limit_per_connection(2)
         .add_service(service)
