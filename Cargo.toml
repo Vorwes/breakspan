@@ -21,3 +21,15 @@ clap = { version = "4.5", features = ["derive"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Mechanical enforcement of AGENTS.md rules; CI denies warnings. Test exemptions
+# live in clippy.toml.
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+redundant_clone = "warn"
+clone_on_ref_ptr = "warn"
+dbg_macro = "warn"
+todo = "warn"
+allow_attributes_without_reason = "warn"
+cast_possible_truncation = "warn"
