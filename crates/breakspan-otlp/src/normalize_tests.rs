@@ -254,13 +254,16 @@ fn classified(operation: &str, extra: Vec<KeyValue>) -> RawSpan {
     raw.attributes.extend(extra);
     raw
 }
-fn step_name_of(raw: RawSpan) -> Option<String> {
+fn normalize_one(raw: RawSpan) -> Span {
     let parsed = normalize(ExportTraceServiceRequest {
         resource_spans: vec![resource(vec![raw])],
     });
     assert_eq!(parsed.rejected, 0);
     assert_eq!(parsed.spans.len(), 1);
-    parsed.spans.into_iter().next().and_then(|s| s.step_name)
+    parsed.spans.into_iter().next().unwrap()
+}
+fn step_name_of(raw: RawSpan) -> Option<String> {
+    normalize_one(raw).step_name
 }
 
 #[test]
@@ -268,20 +271,16 @@ fn classified_spans_get_step_names_from_their_kind_attribute() {
     let cases = [
         ("invoke_agent", "gen_ai.agent.name", "planner"),
         ("chat", "gen_ai.request.model", "gemini-3.5-flash-lite"),
+        ("text_completion", "gen_ai.request.model", "completer"),
+        ("generate_content", "gen_ai.request.model", "generator"),
         ("embeddings", "gen_ai.request.model", "embedder"),
         ("execute_tool", "gen_ai.tool.name", "calculator"),
     ];
     for (operation, key, name) in cases {
-        let raw = classified(operation, vec![string_attribute(key, name)]);
-        assert_eq!(step_name_of(raw.clone()), Some(name.to_owned()));
+        let span = normalize_one(classified(operation, vec![string_attribute(key, name)]));
+        assert_eq!(span.step_name.as_deref(), Some(name));
         // The source attribute stays available unchanged.
-        let parsed = normalize(ExportTraceServiceRequest {
-            resource_spans: vec![resource(vec![raw])],
-        });
-        assert_eq!(
-            parsed.spans[0].attributes[key],
-            AttributeValue::String(name.into())
-        );
+        assert_eq!(span.attributes[key], AttributeValue::String(name.into()));
     }
 }
 
@@ -300,16 +299,24 @@ fn missing_non_string_or_empty_step_names_are_absent_but_accepted() {
             value: Some(Value::StringValue(String::new())),
         }),
     ];
-    for value in values {
-        let extra = value
-            .map(|value| KeyValue {
-                key: "gen_ai.tool.name".into(),
-                value: Some(value),
-                ..Default::default()
-            })
-            .into_iter()
-            .collect();
-        assert_eq!(step_name_of(classified("execute_tool", extra)), None);
+    let kinds = [
+        ("invoke_agent", "gen_ai.agent.name"),
+        ("chat", "gen_ai.request.model"),
+        ("execute_tool", "gen_ai.tool.name"),
+    ];
+    for (operation, key) in kinds {
+        for value in &values {
+            let extra = value
+                .clone()
+                .map(|value| KeyValue {
+                    key: key.into(),
+                    value: Some(value),
+                    ..Default::default()
+                })
+                .into_iter()
+                .collect();
+            assert_eq!(step_name_of(classified(operation, extra)), None);
+        }
     }
 }
 

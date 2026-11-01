@@ -287,7 +287,8 @@ No lower MSRV is promised yet.
 ## Validation and future direction
 
 Unit tests cover validated types, deterministic trees, deep/cyclic relationships,
-store limits/replacements, cross-trace isolation and normalization budgets.
+store limits/replacements, cross-trace isolation, normalization budgets and
+step-name extraction/accounting.
 Loopback gRPC tests bind an ephemeral port and use the upstream generated client:
 representative exports, late parents across requests, typed unknown attributes,
 missing content/metadata, malformed spans, partial success, oversize requests,
