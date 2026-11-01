@@ -186,7 +186,10 @@ fn resource_amplification_is_bounded_and_smaller_siblings_can_still_fit() {
         resource_spans: vec![large, resource(vec![raw_span(41)])],
     });
     assert!(parsed.rejected > 0);
-    assert_eq!(parsed.spans.len() + parsed.rejected as usize, 41);
+    assert_eq!(
+        parsed.spans.len() + usize::try_from(parsed.rejected).unwrap(),
+        41
+    );
     assert!(
         parsed
             .spans

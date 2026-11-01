@@ -1,4 +1,8 @@
 //! Real OTLP/gRPC wire tests: no external collector, Python, fixed port or sleeps.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers panic on setup failure; clippy's test exemption covers only #[test] functions"
+)]
 use breakspan_core::{AttributeValue, OperationKind, SpanId, SpanStatus, TraceId, render_tree};
 use breakspan_store::{MemoryStore, StoreLimits};
 use opentelemetry_proto::tonic::{
@@ -425,11 +429,8 @@ async fn representative_model_operations_and_parent_cycles_are_supported() {
     let mut receiver = TestReceiver::start(MemoryStore::default()).await;
     let spans = ["chat", "text_completion", "generate_content", "embeddings"]
         .iter()
-        .enumerate()
-        .map(|(i, op)| {
-            let id = i as u8 + 1;
-            span(id, Some(if id == 4 { 1 } else { id + 1 }), Some(op), op)
-        })
+        .zip(1u8..)
+        .map(|(op, id)| span(id, Some(if id == 4 { 1 } else { id + 1 }), Some(op), op))
         .collect();
     assert!(receiver.export(spans).await.partial_success.is_none());
     let trace = receiver.store.trace(trace_id()).await.unwrap();

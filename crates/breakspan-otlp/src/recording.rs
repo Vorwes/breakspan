@@ -175,11 +175,12 @@ impl Recorder {
 // The length prefix and payload share one buffer so each frame is one write.
 fn encode_frame(request: &ExportTraceServiceRequest) -> Result<Vec<u8>, RecordingError> {
     let len = request.encoded_len();
-    if len > MAX_MESSAGE_BYTES {
-        return Err(RecordingError("recording frame exceeds the 1 MiB limit"));
-    }
+    let prefix = match u32::try_from(len) {
+        Ok(prefix) if len <= MAX_MESSAGE_BYTES => prefix,
+        _ => return Err(RecordingError("recording frame exceeds the 1 MiB limit")),
+    };
     let mut frame = Vec::with_capacity(4 + len);
-    frame.extend_from_slice(&(len as u32).to_le_bytes());
+    frame.extend_from_slice(&prefix.to_le_bytes());
     request
         .encode(&mut frame)
         .map_err(|_| RecordingError("could not encode recording frame; recording stopped"))?;

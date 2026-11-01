@@ -1,4 +1,8 @@
 //! Recording/reloading behavior through the real loopback OTLP/gRPC boundary.
+#![allow(
+    clippy::unwrap_used,
+    reason = "test helpers panic on setup failure; clippy's test exemption covers only #[test] functions"
+)]
 use breakspan_core::{SpanId, TraceId, render_tree};
 use breakspan_otlp::{DEFAULT_MAX_RECORDING_BYTES, Recorder, RecordingOptions, load};
 use breakspan_store::{MemoryStore, StoreLimits};
@@ -152,9 +156,12 @@ fn request(spans: Vec<Span>) -> ExportTraceServiceRequest {
 fn trace_id() -> TraceId {
     TraceId::new([1; 16]).unwrap()
 }
+fn length_prefix(len: usize) -> [u8; 4] {
+    u32::try_from(len).unwrap().to_le_bytes()
+}
 fn frame(export: &ExportTraceServiceRequest) -> Vec<u8> {
     let body = export.encode_to_vec();
-    let mut frame = (body.len() as u32).to_le_bytes().to_vec();
+    let mut frame = length_prefix(body.len()).to_vec();
     frame.extend_from_slice(&body);
     frame
 }
@@ -402,12 +409,12 @@ async fn malformed_frames_error_without_prefix_and_warn_after_complete_prefix() 
     let path = temp.file(&format!("{PRIVATE_CONTENT}.bspan"));
     let good = request(vec![span(1, None, "chat", PRIVATE_CONTENT)]);
     let good_bytes = recording(&[good]);
-    let mut truncated_body = (PRIVATE_CONTENT.len() as u32 + 1).to_le_bytes().to_vec();
+    let mut truncated_body = length_prefix(PRIVATE_CONTENT.len() + 1).to_vec();
     truncated_body.extend_from_slice(PRIVATE_CONTENT.as_bytes());
-    let mut invalid_prost = (PRIVATE_CONTENT.len() as u32 + 1).to_le_bytes().to_vec();
+    let mut invalid_prost = length_prefix(PRIVATE_CONTENT.len() + 1).to_vec();
     invalid_prost.push(0x0f); // Field 1 with illegal protobuf wire type 7.
     invalid_prost.extend_from_slice(PRIVATE_CONTENT.as_bytes());
-    let mut oversize = (MAX_FRAME_BYTES as u32 + 1).to_le_bytes().to_vec();
+    let mut oversize = length_prefix(MAX_FRAME_BYTES + 1).to_vec();
     oversize.extend_from_slice(PRIVATE_CONTENT.as_bytes());
     let mut corruptions = vec![truncated_body, invalid_prost, oversize];
     corruptions.extend((1..4).map(|length| vec![0xff; length]));
@@ -481,7 +488,7 @@ async fn maximum_one_mebibyte_frame_length_is_inclusive() {
     let mut payload = vec![0; MAX_FRAME_BYTES];
     payload[..4].copy_from_slice(&[0x12, 0xfc, 0xff, 0x3f]);
     let mut bytes = HEADER.to_vec();
-    bytes.extend_from_slice(&(MAX_FRAME_BYTES as u32).to_le_bytes());
+    bytes.extend_from_slice(&length_prefix(MAX_FRAME_BYTES));
     bytes.extend_from_slice(&payload);
     fs::write(&path, &bytes).unwrap();
     let store = MemoryStore::default();

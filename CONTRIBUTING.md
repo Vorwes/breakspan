@@ -24,6 +24,14 @@ other contribution.
    and known limitations. **The implementing agent must never merge its own PR.**
    Wait for human review and merge approval.
 
+Clippy lints are configured in `[workspace.lints.clippy]` and enforced by the
+warnings-denied Clippy run. They forbid `unwrap()`/`expect()`, `dbg!` and `todo!`
+outside tests (`clippy.toml` exempts `#[test]` functions and `#[cfg(test)]`
+modules), redundant or implicit `Rc`/`Arc` clones, and possibly truncating casts.
+Prefer fixing a lint over suppressing it; a suppression needs `reason = "..."`
+and the narrowest practical scope. Integration-test crates allow `unwrap_used`
+at crate level because Clippy's test exemption does not cover their helpers.
+
 Use stable Rust (see `rust-toolchain.toml`). Commit `Cargo.lock` for reproducible
 application builds. Never commit captured prompts, credentials or private traces.
 The project is MIT licensed; contributions are made under that license.

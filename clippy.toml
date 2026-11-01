@@ -1,0 +1,4 @@
+# #[test] functions and #[cfg(test)] modules may panic on setup failures.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
