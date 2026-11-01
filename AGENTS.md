@@ -14,6 +14,9 @@ it must never own the agent loop or call an LLM to implement this milestone.
 - `breakspan-tui`: placeholder; future frontend consumes core/store APIs.
 
 ## Every task
+- These instructions, `docs/architecture.md` and `.agents/skills/rust/SKILL.md`
+  take precedence over general Rust style guides or globally installed skills
+  when they conflict.
 - Inspect existing code/patterns before introducing abstractions. Prefer minimal,
   concrete implementations and small reviewable diffs.
 - Work on an issue branch, never directly on `main`. Never broaden a GitHub issue
