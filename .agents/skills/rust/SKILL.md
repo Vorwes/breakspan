@@ -5,6 +5,8 @@ description: Implement and review Rust code in Breakspan. Use for domain models,
 
 # Breakspan Rust guidance
 
+- These rules, AGENTS.md and docs/architecture.md take precedence over general
+  Rust style guides or skills when they conflict.
 - Read root AGENTS.md and docs/architecture.md before changing boundaries.
 - Use types to make invalid states difficult to represent: IDs have fixed sizes
   and are nonzero; validated timing cannot have an end before its start.
