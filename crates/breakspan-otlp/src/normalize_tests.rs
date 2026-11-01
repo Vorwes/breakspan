@@ -238,3 +238,152 @@ fn duplicate_keys_are_last_wins_and_profiling_references_are_nonfatal() {
         AttributeValue::Empty
     );
 }
+
+fn string_attribute(key: &str, value: &str) -> KeyValue {
+    KeyValue {
+        key: key.into(),
+        value: Some(AnyValue {
+            value: Some(Value::StringValue(value.into())),
+        }),
+        ..Default::default()
+    }
+}
+fn classified(operation: &str, extra: Vec<KeyValue>) -> RawSpan {
+    let mut raw = raw_span(1);
+    raw.attributes = vec![string_attribute("gen_ai.operation.name", operation)];
+    raw.attributes.extend(extra);
+    raw
+}
+fn step_name_of(raw: RawSpan) -> Option<String> {
+    let parsed = normalize(ExportTraceServiceRequest {
+        resource_spans: vec![resource(vec![raw])],
+    });
+    assert_eq!(parsed.rejected, 0);
+    assert_eq!(parsed.spans.len(), 1);
+    parsed.spans.into_iter().next().and_then(|s| s.step_name)
+}
+
+#[test]
+fn classified_spans_get_step_names_from_their_kind_attribute() {
+    let cases = [
+        ("invoke_agent", "gen_ai.agent.name", "planner"),
+        ("chat", "gen_ai.request.model", "gemini-3.5-flash-lite"),
+        ("embeddings", "gen_ai.request.model", "embedder"),
+        ("execute_tool", "gen_ai.tool.name", "calculator"),
+    ];
+    for (operation, key, name) in cases {
+        let raw = classified(operation, vec![string_attribute(key, name)]);
+        assert_eq!(step_name_of(raw.clone()), Some(name.to_owned()));
+        // The source attribute stays available unchanged.
+        let parsed = normalize(ExportTraceServiceRequest {
+            resource_spans: vec![resource(vec![raw])],
+        });
+        assert_eq!(
+            parsed.spans[0].attributes[key],
+            AttributeValue::String(name.into())
+        );
+    }
+}
+
+#[test]
+fn missing_non_string_or_empty_step_names_are_absent_but_accepted() {
+    let values = [
+        None,
+        Some(AnyValue { value: None }),
+        Some(AnyValue {
+            value: Some(Value::IntValue(7)),
+        }),
+        Some(AnyValue {
+            value: Some(Value::StringValueStrindex(3)),
+        }),
+        Some(AnyValue {
+            value: Some(Value::StringValue(String::new())),
+        }),
+    ];
+    for value in values {
+        let extra = value
+            .map(|value| KeyValue {
+                key: "gen_ai.tool.name".into(),
+                value: Some(value),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(step_name_of(classified("execute_tool", extra)), None);
+    }
+}
+
+#[test]
+fn step_name_attributes_on_other_kinds_are_ignored() {
+    let all_names = || {
+        vec![
+            string_attribute("gen_ai.agent.name", "agent"),
+            string_attribute("gen_ai.request.model", "model"),
+            string_attribute("gen_ai.tool.name", "tool"),
+        ]
+    };
+    assert_eq!(
+        step_name_of(classified("invoke_agent", all_names())),
+        Some("agent".into())
+    );
+    assert_eq!(
+        step_name_of(classified("chat", all_names())),
+        Some("model".into())
+    );
+    assert_eq!(
+        step_name_of(classified("execute_tool", all_names())),
+        Some("tool".into())
+    );
+    assert_eq!(
+        step_name_of(classified(
+            "chat",
+            vec![string_attribute("gen_ai.tool.name", "tool")]
+        )),
+        None
+    );
+    assert_eq!(
+        step_name_of(classified("future_operation", all_names())),
+        None
+    );
+    let mut unclassified = raw_span(1);
+    unclassified.attributes = all_names();
+    assert_eq!(step_name_of(unclassified), None);
+}
+
+#[test]
+fn extracted_step_name_is_charged_to_the_normalization_budget() {
+    let name = "x".repeat(32);
+    let raw = classified(
+        "execute_tool",
+        vec![string_attribute("gen_ai.tool.name", &name)],
+    );
+    let resource = ResourceSpans::default();
+    let scope = ScopeSpans::default();
+    let mut unbounded = usize::MAX;
+    normalize_span(&raw, &resource, &scope, &mut unbounded).unwrap();
+    let without_name = classified(
+        "execute_tool",
+        vec![string_attribute("vendor.tool.name", &name)],
+    );
+    let mut unbounded_without_name = usize::MAX;
+    normalize_span(
+        &without_name,
+        &resource,
+        &scope,
+        &mut unbounded_without_name,
+    )
+    .unwrap();
+    // Equal-length keys and values: the only difference is the copied step name.
+    let charge = usize::MAX - unbounded;
+    assert_eq!(charge, usize::MAX - unbounded_without_name + name.len());
+
+    let mut exact = charge;
+    let parsed = normalize_span(&raw, &resource, &scope, &mut exact).unwrap();
+    assert_eq!(parsed.step_name.as_deref(), Some(name.as_str()));
+    assert_eq!(exact, 0);
+    let mut one_byte_short = charge - 1;
+    assert_eq!(
+        normalize_span(&raw, &resource, &scope, &mut one_byte_short),
+        Err("normalized export exceeds budget")
+    );
+}

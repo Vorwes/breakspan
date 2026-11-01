@@ -125,7 +125,10 @@ fn span_id(id: u8) -> SpanId {
 #[tokio::test]
 async fn genai_export_normalizes_and_late_parent_repairs_tree() {
     let mut receiver = TestReceiver::start(MemoryStore::default()).await;
-    let model = span(2, Some(1), Some("chat"), "chat");
+    let mut model = span(2, Some(1), Some("chat"), "chat");
+    model
+        .attributes
+        .push(string("gen_ai.request.model", "synthetic-model"));
     let mut tool = span(3, Some(1), Some("execute_tool"), "execute_tool read_file");
     tool.attributes.extend([
         string("gen_ai.tool.name", "read_file"),
@@ -181,8 +184,15 @@ async fn genai_export_normalizes_and_late_parent_repairs_tree() {
     assert_eq!(root.timing.end_unix_nanos(), 4_220_000_000);
     assert_eq!(trace.spans()[&span_id(2)].operation, OperationKind::Model);
     assert_eq!(trace.spans()[&span_id(2)].status, SpanStatus::Unset);
+    assert_eq!(
+        trace.spans()[&span_id(2)].step_name.as_deref(),
+        Some("synthetic-model")
+    );
+    // The root has no gen_ai.agent.name; its span name is not used instead.
+    assert_eq!(root.step_name, None);
     let tool = &trace.spans()[&span_id(3)];
     assert_eq!(tool.operation, OperationKind::Tool);
+    assert_eq!(tool.step_name.as_deref(), Some("read_file"));
     assert_eq!(tool.parent_id, Some(root.id));
     assert_eq!(tool.status, SpanStatus::Error("file not found".into()));
     assert_eq!(tool.attributes["vendor.tokens"], AttributeValue::Int(42));
@@ -212,7 +222,7 @@ async fn genai_export_normalizes_and_late_parent_repairs_tree() {
         tool.scope.attributes["scope.flag"],
         AttributeValue::Bool(true)
     );
-    // No prompts, model identity, tool arguments/results or agent identity needed.
+    // Trees need no prompts or tool arguments/results; step names do not change them.
     let tree = render_tree(&trace);
     assert!(
         tree.contains(

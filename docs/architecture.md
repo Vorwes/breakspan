@@ -60,6 +60,9 @@ frontend/plugin/query trait hierarchy is introduced now.
   meaning and are treated as empty; dictionary keys are not resolved.
 - `OperationKind`: agent, model, tool, other. Original operation attributes remain
   available even if the convention/operation is unknown.
+- Step name: an optional string naming the agent, model or tool a classified span
+  represents. Core holds only the value, never the convention keys it came from.
+  `None` means no name was found; the span name is not substituted.
 - `Trace`: spans keyed by ID. Initially one trace is the run grouping; no
   framework-specific run ID or complete-run lifecycle is inferred.
 
@@ -239,10 +242,26 @@ Names, prompts, provider/model identity and tool arguments/results are not neede
 for classification. No framework heuristics or speculative aliases are used.
 New conventions require a scoped normalization change with fixtures.
 
+After classification, one string attribute supplies the span's step name:
+
+| Domain kind | Step-name attribute |
+| --- | --- |
+| Agent | `gen_ai.agent.name` |
+| Model | `gen_ai.request.model` |
+| Tool | `gen_ai.tool.name` |
+| Other | none |
+
+A missing, non-string or empty attribute gives no name and never rejects the
+span. An attribute belonging to another kind (for example `gen_ai.tool.name` on
+a model span) is ignored. The copied name is charged to the normalization budget
+and to store byte accounting; the source attribute is retained unchanged. Provider
+name, token usage and content attributes are not interpreted.
+
 In `normalize.rs`, ID/timing validation and final span construction stay together;
-private helpers isolate operation classification, status conversion and optional
-scope conversion. Budgeted copies retain their charge order, and the export-level
-loop restores the budget for rejected spans before processing siblings.
+private helpers isolate operation classification, step-name extraction, status
+conversion and optional scope conversion. Budgeted copies retain their charge
+order, and the export-level loop restores the budget for rejected spans before
+processing siblings.
 
 Dependencies use upstream libraries with concrete roles:
 - `opentelemetry-proto`: upstream generated messages and service; only `trace`

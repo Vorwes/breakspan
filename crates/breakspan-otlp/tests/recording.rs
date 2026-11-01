@@ -315,6 +315,57 @@ async fn checked_in_synthetic_fixture_matches_known_rendered_tree() {
 }
 
 #[tokio::test]
+async fn loaded_recordings_produce_step_names() {
+    let named = |id, operation, key: &str, value: &str| {
+        let mut span = span(id, Some(1), operation, "step");
+        span.attributes.push(KeyValue {
+            key: key.into(),
+            value: Some(AnyValue {
+                value: Some(Value::StringValue(value.into())),
+            }),
+            ..Default::default()
+        });
+        span
+    };
+    let mut agent = named(1, "invoke_agent", "gen_ai.agent.name", "planner");
+    agent.parent_span_id.clear();
+    let export = request(vec![
+        agent,
+        named(2, "chat", "gen_ai.request.model", "synthetic-model"),
+        named(3, "execute_tool", "gen_ai.tool.name", "calculator"),
+        // A tool name on a model span is ignored.
+        named(4, "chat", "gen_ai.tool.name", "calculator"),
+    ]);
+    let temp = TempDir::new();
+    let path = temp.file("named.bspan");
+    fs::write(&path, recording(&[export])).unwrap();
+    let store = MemoryStore::default();
+    let report = load(&path, store.clone(), DEFAULT_MAX_RECORDING_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(report.frames, 1);
+    assert_eq!(report.rejected_spans, 0);
+    assert!(report.warning.is_none());
+    let trace = store.trace(trace_id()).await.unwrap();
+    let names: Vec<_> = (1..=4)
+        .map(|id| {
+            trace.spans()[&SpanId::new([id; 8]).unwrap()]
+                .step_name
+                .as_deref()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            Some("planner"),
+            Some("synthetic-model"),
+            Some("calculator"),
+            None
+        ]
+    );
+}
+
+#[tokio::test]
 async fn semantically_rejected_spans_are_recorded_and_revalidated() {
     let temp = TempDir::new();
     let path = temp.file("rejected.bspan");
