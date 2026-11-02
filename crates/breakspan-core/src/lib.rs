@@ -125,6 +125,10 @@ pub struct Span {
     pub timing: Timing,
     pub status: SpanStatus,
     pub operation: OperationKind,
+    /// Name of the agent, model or tool a classified span represents, when the
+    /// telemetry identifies one. `None` means no name was found; it is never
+    /// derived from the span name.
+    pub step_name: Option<String>,
     pub attributes: Attributes,
     pub resource_attributes: Attributes,
     pub resource_schema_url: String,
@@ -172,6 +176,7 @@ mod tests {
             timing: Timing::new(u64::from(id), u64::from(id) + 6_000_000).unwrap(),
             status: SpanStatus::Unset,
             operation: OperationKind::Other,
+            step_name: None,
             attributes: Attributes::new(),
             resource_attributes: Attributes::new(),
             resource_schema_url: String::new(),

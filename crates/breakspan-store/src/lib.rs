@@ -127,6 +127,7 @@ fn span_bytes(span: &Span) -> usize {
     };
     1024 + span.name.len()
         + status_bytes
+        + span.step_name.as_ref().map_or(0, String::len)
         + attributes_bytes(&span.attributes)
         + attributes_bytes(&span.resource_attributes)
         + span.resource_schema_url.len()
@@ -152,6 +153,7 @@ mod tests {
             timing: Timing::new(u64::from(id), u64::from(id) + 1).unwrap(),
             status: SpanStatus::Unset,
             operation: OperationKind::Other,
+            step_name: None,
             attributes: Attributes::new(),
             resource_attributes: Attributes::new(),
             resource_schema_url: String::new(),
@@ -197,6 +199,20 @@ mod tests {
                 .name,
             "span1"
         );
+    }
+
+    #[tokio::test]
+    async fn step_names_count_toward_storage_bytes() {
+        let unnamed_bytes = span_bytes(&span(1, None));
+        let mut named = span(1, None);
+        named.step_name = Some("x".repeat(64));
+        assert_eq!(span_bytes(&named), unnamed_bytes + 64);
+        let store = MemoryStore::new(StoreLimits {
+            max_spans: 1,
+            max_bytes: unnamed_bytes + 63,
+        });
+        assert_eq!(store.ingest(vec![named]).await, 1);
+        assert_eq!(store.ingest(vec![span(1, None)]).await, 0);
     }
 
     #[tokio::test]

@@ -31,12 +31,20 @@ provider.add_span_processor(BatchSpanProcessor(exporter))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer("breakspan.instrumentation-demo", "0.1.0")
 
+# Agent, model and tool names are what Breakspan normalizes as step names.
+MODEL_ATTRIBUTES = {
+    "gen_ai.operation.name": "chat",
+    "gen_ai.request.model": "synthetic-model",
+}
+
 with tracer.start_as_current_span(
-    "invoke_agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+    "invoke_agent",
+    attributes={
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.agent.name": "synthetic-agent",
+    },
 ):
-    with tracer.start_as_current_span(
-        "chat", attributes={"gen_ai.operation.name": "chat"}
-    ):
+    with tracer.start_as_current_span("chat", attributes=MODEL_ATTRIBUTES):
         time.sleep(0.02)
     with tracer.start_as_current_span(
         "execute_tool read_file",
@@ -46,9 +54,7 @@ with tracer.start_as_current_span(
         },
     ):
         time.sleep(0.005)
-    with tracer.start_as_current_span(
-        "chat", attributes={"gen_ai.operation.name": "chat"}
-    ):
+    with tracer.start_as_current_span("chat", attributes=MODEL_ATTRIBUTES):
         time.sleep(0.02)
 
 try:

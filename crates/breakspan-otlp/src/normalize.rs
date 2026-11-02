@@ -87,6 +87,7 @@ fn normalize_span(
     spend(budget, 1024)?;
     let attributes = attributes(&raw.attributes, 0, budget)?;
     let operation = classify_operation(&attributes);
+    let step_name = step_name(operation, &attributes, budget)?;
     let status = normalize_status(raw.status.as_ref(), budget)?;
     let resource_attributes = match &resource.resource {
         Some(resource) => self::attributes(&resource.attributes, 0, budget)?,
@@ -101,6 +102,7 @@ fn normalize_span(
         timing,
         status,
         operation,
+        step_name,
         attributes,
         resource_attributes,
         resource_schema_url: copy_text(&resource.schema_url, budget)?,
@@ -117,6 +119,25 @@ fn classify_operation(attributes: &Attributes) -> OperationKind {
             _ => OperationKind::Other,
         },
         _ => OperationKind::Other,
+    }
+}
+
+/// Only the attribute matching the classified kind names a step. Missing,
+/// non-string and empty values give no name; they never reject the span.
+fn step_name(
+    operation: OperationKind,
+    attributes: &Attributes,
+    budget: &mut usize,
+) -> ParseResult<Option<String>> {
+    let key = match operation {
+        OperationKind::Agent => "gen_ai.agent.name",
+        OperationKind::Model => "gen_ai.request.model",
+        OperationKind::Tool => "gen_ai.tool.name",
+        OperationKind::Other => return Ok(None),
+    };
+    match attributes.get(key) {
+        Some(AttributeValue::String(name)) if !name.is_empty() => copy_text(name, budget).map(Some),
+        _ => Ok(None),
     }
 }
 
