@@ -25,12 +25,12 @@ breakspan-store ── bounded memory, trace-ID grouping, snapshot queries
         ├── breakspan-cli ── startup, notifications, text output
         └── future breakspan-tui / other frontends
                      │
-              breakspan-core ── domain model, deterministic tree rendering
+              breakspan-core ── domain model, tree rendering, step comparison
 ```
 
 | Crate | Owns | Must not own |
 | --- | --- | --- |
-| `breakspan-core` | Canonical IDs, spans, timing, metadata, traces and tree rendering | OTel/protobuf/tonic, runtimes, databases, frontend types |
+| `breakspan-core` | Canonical IDs, spans, timing, metadata, traces, tree rendering and step comparison | OTel/protobuf/tonic, runtimes, databases, frontend types |
 | `breakspan-otlp` | TraceService server, recording/loading format, wire-input validation and semantic-convention mapping | Agent loops, storage implementation, UI logic |
 | `breakspan-store` | In-memory retention, capacity accounting, snapshot queries and change notification | Transport decoding, GenAI interpretation |
 | `breakspan-cli` | Executable, flags, loopback binding, recording/loading orchestration, shutdown and text output | Protobuf types, normalization or domain debugger logic |
@@ -95,8 +95,51 @@ render. Labels escape control characters and are limited to 200 characters.
 Parent relationships remain in the canonical data even when malformed as a graph.
 
 Inside `tree.rs`, private helpers separate hierarchy indexing and component-root
-selection from iterative traversal and text-line formatting. `render_tree` only
-orchestrates these steps; no public graph or renderer abstraction is introduced.
+selection from iterative traversal and text-line formatting. A crate-private
+`walk` visits every span once in this deterministic pre-order, passing state
+derived from the traversal parent; `render_tree` and step comparison both use it,
+so there is one implementation of hierarchy and cycle handling. No public graph
+or renderer abstraction is introduced.
+
+## Step comparison
+
+`breakspan diff A B` is the first DIFF slice: a structural comparison that
+reports where two runs' step sequences first differ. It makes no causal or
+semantic claim. `compare_steps` in `breakspan-core` operates on two `Trace`
+values and knows nothing about recordings, OTLP or stores. The CLI loads each
+recording into its own bounded store, requires exactly one trace and a complete
+load, runs the comparison and rendering on a blocking-pool task, prints, and
+maps exit codes.
+
+- **Steps.** Agent, model and tool spans. `Other` spans are transparent: during
+  the shared `walk`, each step records its nearest step ancestor, so a step below
+  graph/chain nodes becomes a child of that ancestor, or a root. Because `walk`
+  visits each span once, the result is a forest even when parents are cyclic.
+- **Identity.** Kind plus step name, falling back to the span name when there is
+  no step name. A step name equal to another span's name is the same identity.
+- **Order.** Step roots and siblings sort by start time, then identity (kind,
+  then name), then span ID, so equal start times do not depend on random IDs.
+  The step forest is walked iteratively in pre-order.
+- **Comparison.** Position by position on depth, identity and error status.
+  Unset, OK and unknown status codes are all "not an error"; error messages are
+  not compared. IDs, timing, resources, scope and other attributes are ignored.
+  The first differing position, or the first position where only one run still
+  has a step, is the divergence.
+- **Output.** The 1-based step position, the step ancestors both runs share
+  (above the shallower divergent step), each side's label, depth and status, and
+  the number of matching steps. Labels are escaped and truncated like tree labels.
+  Paths longer than 64 ancestors keep the root and the nearest 63.
+- **Exit codes.** `0` no divergence, `1` divergence, `2` usage, load or input
+  error, following `diff(1)`; other commands use `1` for errors. Zero or several
+  traces, a damaged header and a partially loaded recording exit `2` without a
+  comparison. Rejected spans are reported on stderr and comparison continues.
+
+In a parent cycle, which member is treated as the component root follows tree
+rendering (start time, then span ID), so it can depend on IDs when cycle members
+start together. Results stay deterministic for the same input. There is no
+realignment after the first divergence (LCS/Myers), no list of every difference,
+no trace selection from multi-trace recordings, and no comparison of prompts,
+arguments, results, timing or token usage.
 
 OTLP exports completed spans, but does not announce a complete trace. Therefore
 CLI output is explicitly a **snapshot**, not a final run. Change notifications
@@ -144,9 +187,9 @@ Git. This is a local development backend, not a production security perimeter.
 
 Recordings are an opt-in TRACE prerequisite, not a database, comparison engine
 or replay feature. `breakspan-otlp` owns encoding, framing, file I/O and loading;
-protobuf remains inside that crate. The CLI only wires `listen --record FILE`
-and `show FILE`, obtains store snapshots and renders them through the same
-blocking-pool output helper used by live snapshots. `show` prints once after
+protobuf remains inside that crate. The CLI only wires `listen --record FILE`,
+`show FILE` and `diff A B`. `show` obtains store snapshots and renders them through
+the same blocking-pool output helper used by live snapshots. `show` prints once after
 loading, not after each export.
 
 The version-1 `.bspan` format is:
@@ -287,8 +330,10 @@ No lower MSRV is promised yet.
 ## Validation and future direction
 
 Unit tests cover validated types, deterministic trees, deep/cyclic relationships,
-store limits/replacements, cross-trace isolation, normalization budgets and
-step-name extraction/accounting.
+store limits/replacements, cross-trace isolation, normalization budgets,
+step-name extraction/accounting and step comparison (transparent `Other` spans,
+equal start times, prefixes, status, malformed hierarchies, label escaping).
+Executable tests cover `show` and `diff` exit codes and output with real recordings.
 Loopback gRPC tests bind an ephemeral port and use the upstream generated client:
 representative exports, late parents across requests, typed unknown attributes,
 missing content/metadata, malformed spans, partial success, oversize requests,
@@ -325,13 +370,13 @@ prints only a simple failure message; raw provider details and HTTP failure
 reasons are neither printed nor exported.
 
 The eventual progression is TRACE (what happened), DIFF (what changed), DIAGNOSE
-(where failure began), then REPLAY through compatible harnesses. First meaningful
-divergence, repeated equivalent tool loops, missing verification, stale state,
+(where failure began), then REPLAY through compatible harnesses. The first DIFF
+slice is structural only. Semantically meaningful divergence, repeated equivalent tool loops, missing verification, stale state,
 context growth and downstream consequences are future analysis concerns. Nothing
 here claims causal diagnosis. Replay would delegate operations to compatible
 harnesses; Breakspan still would not own an agent loop.
 
-No comparison, failure localization, semantic-loop detection, AI diagnosis,
+No realigning or semantic comparison, failure localization, semantic-loop detection, AI diagnosis,
 context profiling, assertions, replay/forking, MCP proxy, multi-agent UI, GPUI,
 cloud services, authentication, distributed deployment or plugin system is
 implemented. Extend only against human-approved issues and acceptance criteria.

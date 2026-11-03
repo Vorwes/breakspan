@@ -19,8 +19,10 @@ Implemented today:
 - Bounded in-memory traces and arrival-order-independent execution trees.
 - A headless CLI that prints provisional snapshots; a TUI crate is reserved.
 - Opt-in bounded raw OTLP recordings and offline execution-tree loading.
+- Structural comparison of two recordings, reporting the first divergent step.
 
-There is **no comparison, failure diagnosis or replay yet**.
+There is **no failure diagnosis or replay yet**, and comparison makes no causal
+or semantic claim.
 
 ```text
 existing agent / harness
@@ -90,6 +92,44 @@ including fields not shown in trees. They are not byte-for-byte network captures
 unknown protobuf wire fields are not preserved. Never commit captured recordings,
 even if they appear harmless. Root `/recordings/` is ignored for local use;
 only the intentionally synthetic fixture belongs in Git.
+
+### Compare two recordings
+
+```sh
+breakspan diff recordings/good.bspan recordings/bad.bspan
+```
+
+`diff` loads each recording like `show` (the same `--max-recording-bytes` and
+`--max-spans` options apply to each) and walks both runs' **steps** in the same
+order until they first differ:
+
+```text
+First divergence at step 3
+  path: agent calculator
+  a: tool calculator  depth 1  [error]
+  b: tool calculator  depth 1  [ok]
+2 matching steps before divergence.
+```
+
+A step is a span classified as agent, model or tool. Other spans (graph nodes,
+chains) are skipped; their step descendants count as children of the nearest
+step ancestor. A step's identity is its kind plus its step name (agent name,
+requested model or tool name), or the span name when the telemetry has none.
+Siblings are ordered by start time, then identity, then span ID. Steps differ
+when their depth in the step tree, identity or error status differs (unset, OK
+and unknown status codes all count as not an error), or when one run has steps
+left. Span IDs, timing, error messages, prompts, arguments, results and other
+attributes are ignored. `path` lists the step ancestors both runs share.
+
+Exit codes follow `diff(1)`: `0` no divergence, `1` the runs diverge, `2` usage,
+load or input error (unlike `show`, which exits `1` on errors). Each recording
+must contain exactly one trace. A recording that loads only partially is an
+error, so a truncated run is never reported as a divergence. Rejected spans are
+reported on stderr and the comparison continues without them.
+
+Only the first divergence is reported; there is no realignment afterwards.
+Missing parents, multiple roots and parent cycles are compared deterministically,
+but such malformed hierarchies can make the reported position less meaningful.
 
 ### Reproducible external instrumentation demo
 
@@ -248,8 +288,8 @@ Rust OpenTelemetry trace APIs are Beta; GenAI semantic conventions are
 Development and can change. The implemented operation mapping and authoritative
 sources are documented in [architecture](docs/architecture.md#interoperability-and-dependency-decisions).
 
-No database-backed storage, full TUI/GUI, span-event/link analysis, run comparison,
-first-divergence detection, semantic-loop detection, behavioral assertions,
+No database-backed storage, full TUI/GUI, span-event/link analysis, semantic or
+realigning run comparison, semantic-loop detection, behavioral assertions,
 context profiling or replay is implemented. OpenAI Agents SDK, LangGraph and
 other harness integrations depend on those systems emitting compatible spans;
 they are not bundled adapters or individually certified integrations.
