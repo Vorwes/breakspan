@@ -1,7 +1,9 @@
 //! Breakspan's framework-independent execution model.
 
+mod diff;
 mod tree;
 
+pub use diff::{StepComparison, compare_steps};
 use std::{collections::BTreeMap, fmt, time::Duration};
 pub use tree::render_tree;
 
