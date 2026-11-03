@@ -115,7 +115,8 @@ A step is a span classified as agent, model or tool. Other spans (graph nodes,
 chains) are skipped; their step descendants count as children of the nearest
 step ancestor. A step's identity is its kind plus its step name (agent name,
 requested model or tool name), or the span name when the telemetry has none.
-Siblings are ordered by start time, then identity, then span ID. Steps differ
+Siblings are ordered by start time, then identity, then error status, then span
+ID. Steps differ
 when their depth in the step tree, identity or error status differs (unset, OK
 and unknown status codes all count as not an error), or when one run has steps
 left. Span IDs, timing, error messages, prompts, arguments, results and other
@@ -123,13 +124,16 @@ attributes are ignored. `path` lists the step ancestors both runs share.
 
 Exit codes follow `diff(1)`: `0` no divergence, `1` the runs diverge, `2` usage,
 load or input error (unlike `show`, which exits `1` on errors). Each recording
-must contain exactly one trace. A recording that loads only partially is an
-error, so a truncated run is never reported as a divergence. Rejected spans are
-reported on stderr and the comparison continues without them.
+must contain exactly one trace. A recording that loads only partially, or in
+which any span is rejected (invalid, or over `--max-spans` or the 64 MiB storage
+limit), is an error, so an incomplete run is never reported as a divergence.
+If a large recording hits the span limit, raise `--max-spans`.
 
 Only the first divergence is reported; there is no realignment afterwards.
 Missing parents, multiple roots and parent cycles are compared deterministically,
 but such malformed hierarchies can make the reported position less meaningful.
+Sibling steps that start at the same time and match in identity and status, but
+differ in their descendants, are still ordered by span ID.
 
 ### Reproducible external instrumentation demo
 

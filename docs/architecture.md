@@ -107,9 +107,10 @@ or renderer abstraction is introduced.
 reports where two runs' step sequences first differ. It makes no causal or
 semantic claim. `compare_steps` in `breakspan-core` operates on two `Trace`
 values and knows nothing about recordings, OTLP or stores. The CLI loads each
-recording into its own bounded store, requires exactly one trace and a complete
-load, runs the comparison and rendering on a blocking-pool task, prints, and
-maps exit codes.
+recording into its own bounded store (both loads run concurrently; errors are
+reported for `a` before `b`), requires exactly one trace and a complete load,
+runs the comparison and rendering on a blocking-pool task, prints, and maps exit
+codes. `show` and `diff` share one definition of the loading limit flags.
 
 - **Steps.** Agent, model and tool spans. `Other` spans are transparent: during
   the shared `walk`, each step records its nearest step ancestor, so a step below
@@ -118,8 +119,11 @@ maps exit codes.
 - **Identity.** Kind plus step name, falling back to the span name when there is
   no step name. A step name equal to another span's name is the same identity.
 - **Order.** Step roots and siblings sort by start time, then identity (kind,
-  then name), then span ID, so equal start times do not depend on random IDs.
-  The step forest is walked iteratively in pre-order.
+  then name), then error status, then span ID. Every field compared for a step
+  precedes the span ID, so equal start times fall back to random IDs only
+  between steps that compare equal. Such steps can still differ in their
+  descendants; ordering them by subtree content is not attempted. The step
+  forest is walked iteratively in pre-order.
 - **Comparison.** Position by position on depth, identity and error status.
   Unset, OK and unknown status codes are all "not an error"; error messages are
   not compared. IDs, timing, resources, scope and other attributes are ignored.
@@ -131,8 +135,10 @@ maps exit codes.
   Paths longer than 64 ancestors keep the root and the nearest 63.
 - **Exit codes.** `0` no divergence, `1` divergence, `2` usage, load or input
   error, following `diff(1)`; other commands use `1` for errors. Zero or several
-  traces, a damaged header and a partially loaded recording exit `2` without a
-  comparison. Rejected spans are reported on stderr and comparison continues.
+  traces, a damaged header, a partially loaded recording and any rejected span
+  exit `2` without a comparison. A capacity rejection truncates the run, and an
+  invalid replacement leaves a stale earlier copy of its span; `LoadReport` does
+  not distinguish capacity from validation rejections, so both are errors.
 
 In a parent cycle, which member is treated as the component root follows tree
 rendering (start time, then span ID), so it can depend on IDs when cycle members
