@@ -1,7 +1,7 @@
 use breakspan_core::{Trace, compare_steps, render_tree};
 use breakspan_otlp::{DEFAULT_MAX_RECORDING_BYTES, Recorder, RecordingOptions};
 use breakspan_store::{MemoryStore, StoreLimits};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::{
     error::Error,
     io::{self, Write},
@@ -44,24 +44,39 @@ enum Command {
     /// Load a recording and print its stored execution-tree snapshots once.
     Show {
         file: PathBuf,
-        #[arg(long, default_value_t = DEFAULT_MAX_RECORDING_BYTES, value_parser = clap::value_parser!(u64).range(8..))]
-        max_recording_bytes: u64,
-        #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1..))]
-        max_spans: u32,
+        #[command(flatten)]
+        limits: LoadLimits,
     },
     /// Compare two single-trace recordings and report their first divergent step.
     ///
-    /// Exits 0 without divergence, 1 when the runs diverge and 2 on errors.
+    /// Each recording is loaded with its own limits. Exits 0 without divergence,
+    /// 1 when the runs diverge and 2 on errors, including any rejected span.
     Diff {
         a: PathBuf,
         b: PathBuf,
-        /// Applies to each recording.
-        #[arg(long, default_value_t = DEFAULT_MAX_RECORDING_BYTES, value_parser = clap::value_parser!(u64).range(8..))]
-        max_recording_bytes: u64,
-        /// Applies to each recording.
-        #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1..))]
-        max_spans: u32,
+        #[command(flatten)]
+        limits: LoadLimits,
     },
+}
+
+/// Limits for loading one recording into memory.
+#[derive(Args, Clone, Copy)]
+struct LoadLimits {
+    /// Maximum recording size, including the header and frame lengths.
+    #[arg(long, default_value_t = DEFAULT_MAX_RECORDING_BYTES, value_parser = clap::value_parser!(u64).range(8..))]
+    max_recording_bytes: u64,
+    /// Maximum number of spans held in memory.
+    #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1..))]
+    max_spans: u32,
+}
+
+impl LoadLimits {
+    fn store(self) -> MemoryStore {
+        MemoryStore::new(StoreLimits {
+            max_spans: self.max_spans as usize,
+            ..Default::default()
+        })
+    }
 }
 
 #[tokio::main]
@@ -95,24 +110,13 @@ async fn run(cli: Cli) -> CliResult<ExitCode> {
             .await?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Show {
-            file,
-            max_recording_bytes,
-            max_spans,
-        } => show(file, max_recording_bytes, max_spans as usize).await,
-        Command::Diff {
-            a,
-            b,
-            max_recording_bytes,
-            max_spans,
-        } => {
+        Command::Show { file, limits } => show(file, limits).await,
+        Command::Diff { a, b, limits } => {
             // Like diff(1), errors exit 2 because 1 means "the runs differ".
-            Ok(diff(a, b, max_recording_bytes, max_spans as usize)
-                .await
-                .unwrap_or_else(|error| {
-                    eprintln!("Error: {error}");
-                    ExitCode::from(2)
-                }))
+            Ok(diff(a, b, limits).await.unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                ExitCode::from(2)
+            }))
         }
     }
 }
@@ -188,12 +192,9 @@ async fn listen(
     result
 }
 
-async fn show(file: PathBuf, max_bytes: u64, max_spans: usize) -> CliResult<ExitCode> {
-    let store = MemoryStore::new(StoreLimits {
-        max_spans,
-        ..Default::default()
-    });
-    let report = breakspan_otlp::load(file, store.clone(), max_bytes).await?;
+async fn show(file: PathBuf, limits: LoadLimits) -> CliResult<ExitCode> {
+    let store = limits.store();
+    let report = breakspan_otlp::load(file, store.clone(), limits.max_recording_bytes).await?;
     print_snapshots(store.snapshots().await).await?;
     if report.rejected_spans != 0 {
         eprintln!(
@@ -208,9 +209,14 @@ async fn show(file: PathBuf, max_bytes: u64, max_spans: usize) -> CliResult<Exit
     Ok(ExitCode::SUCCESS)
 }
 
-async fn diff(a: PathBuf, b: PathBuf, max_bytes: u64, max_spans: usize) -> CliResult<ExitCode> {
-    let a = load_single_trace("a", a, max_bytes, max_spans).await?;
-    let b = load_single_trace("b", b, max_bytes, max_spans).await?;
+async fn diff(a: PathBuf, b: PathBuf, limits: LoadLimits) -> CliResult<ExitCode> {
+    // Both loads run concurrently on blocking-pool workers. Waiting for both
+    // before checking errors keeps the reported error independent of timing.
+    let (a, b) = tokio::join!(
+        load_single_trace("a", a, limits),
+        load_single_trace("b", b, limits)
+    );
+    let (a, b) = (a?, b?);
     let diverged = tokio::task::spawn_blocking(move || -> io::Result<bool> {
         let comparison = compare_steps(&a, &b);
         let stdout = io::stdout();
@@ -223,28 +229,24 @@ async fn diff(a: PathBuf, b: PathBuf, max_bytes: u64, max_spans: usize) -> CliRe
     Ok(ExitCode::from(u8::from(diverged)))
 }
 
-/// A partial load is an error: a truncated run must not look like a divergence.
-async fn load_single_trace(
-    side: &str,
-    file: PathBuf,
-    max_bytes: u64,
-    max_spans: usize,
-) -> CliResult<Trace> {
-    let store = MemoryStore::new(StoreLimits {
-        max_spans,
-        ..Default::default()
-    });
-    let report = breakspan_otlp::load(file, store.clone(), max_bytes)
+/// A partial load or any rejected span is an error: an incomplete run, or one
+/// that kept a stale copy of a span whose replacement was rejected, must not
+/// look like a divergence. Rejections for capacity and for invalid spans are
+/// not distinguished by the loader, so both stop the comparison.
+async fn load_single_trace(side: &str, file: PathBuf, limits: LoadLimits) -> CliResult<Trace> {
+    let store = limits.store();
+    let report = breakspan_otlp::load(file, store.clone(), limits.max_recording_bytes)
         .await
         .map_err(|error| format!("{side}: {error}"))?;
-    if report.rejected_spans != 0 {
-        eprintln!(
-            "Warning: {side}: {} spans rejected while loading (invalid spans or memory limits).",
-            report.rejected_spans
-        );
-    }
     if let Some(warning) = report.warning {
         return Err(format!("{side}: recording loaded only partially: {warning}").into());
+    }
+    if report.rejected_spans != 0 {
+        return Err(format!(
+            "{side}: {} spans rejected while loading (invalid spans or memory limits); the run would be incomplete",
+            report.rejected_spans
+        )
+        .into());
     }
     match <[Trace; 1]>::try_from(store.snapshots().await) {
         Ok([trace]) => Ok(trace),

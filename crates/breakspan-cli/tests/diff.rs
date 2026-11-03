@@ -66,7 +66,7 @@ fn identical_recordings_do_not_diverge() {
 }
 
 #[test]
-fn diverging_recordings_exit_one_and_rejected_spans_are_reported() {
+fn diverging_recordings_exit_one() {
     let temp = TempDir::new();
     let (header, frames) = fixture_frames();
     // Without the replacement frame, the model keeps its superseded name.
@@ -85,23 +85,6 @@ fn diverging_recordings_exit_one_and_rejected_spans_are_reported() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     assert!(output.stderr.is_empty());
-
-    // An invalid replacement is rejected; the comparison continues without it.
-    let mut invalid = frames[2].clone();
-    patch(&mut invalid, &[2; 8], &[0; 8]);
-    let rejected = write(
-        &temp,
-        &format!("{PRIVATE}.bspan"),
-        &header,
-        &[&frames[0], &frames[1], &invalid],
-    );
-    let output = diff(&fixture(), &rejected);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "Warning: b: 1 spans rejected while loading (invalid spans or memory limits).\n"
-    );
 
     // A strict prefix diverges at its first missing step.
     let prefix = write(&temp, "prefix.bspan", &header, &[&frames[0]]);
@@ -128,25 +111,42 @@ fn unusable_recordings_exit_two_without_comparing() {
     truncated.push(0xff); // The next frame's length prefix is truncated.
     let partial = temp.0.join(format!("{PRIVATE}-partial.bspan"));
     fs::write(&partial, truncated).unwrap();
+    // An invalid replacement is rejected, which would leave the stale model.
+    let mut invalid = frames[2].clone();
+    patch(&mut invalid, &[2; 8], &[0; 8]);
+    let rejected = write(
+        &temp,
+        &format!("{PRIVATE}-rejected.bspan"),
+        &header,
+        &[&frames[0], &frames[1], &invalid],
+    );
+    let rejected_error = "spans rejected while loading (invalid spans or memory limits); the run would be incomplete";
 
     for (a, b, error) in [
-        (&empty, &fixture(), "a: expected exactly one trace, found 0"),
+        (&fixture(), &rejected, format!("b: 1 {rejected_error}")),
+        (
+            &empty,
+            &fixture(),
+            "a: expected exactly one trace, found 0".into(),
+        ),
         (
             &fixture(),
             &two_traces,
-            "b: expected exactly one trace, found 2",
+            "b: expected exactly one trace, found 2".into(),
         ),
-        (&damaged, &fixture(), "a: recording: bad magic"),
+        (&damaged, &fixture(), "a: recording: bad magic".into()),
         (
             &fixture(),
             &partial,
-            "b: recording loaded only partially: recording frame 4: truncated frame length",
+            "b: recording loaded only partially: recording frame 4: truncated frame length".into(),
         ),
         (
             &fixture(),
             &temp.0.join("missing.bspan"),
-            "b: recording: could not open file",
+            "b: recording: could not open file".into(),
         ),
+        // When both sides fail, the first side's error is reported.
+        (&damaged, &partial, "a: recording: bad magic".into()),
     ] {
         let output = diff(a, b);
         assert_eq!(output.status.code(), Some(2), "{output:?}");
@@ -155,6 +155,23 @@ fn unusable_recordings_exit_two_without_comparing() {
         assert_eq!(stderr, format!("Error: {error}\n"));
         assert!(!stderr.contains(PRIVATE));
     }
+}
+
+#[test]
+fn reaching_the_span_limit_stops_the_comparison() {
+    // The fixture has three spans; the limit applies to each recording.
+    let output = Command::new(env!("CARGO_BIN_EXE_breakspan"))
+        .arg("diff")
+        .args([fixture(), fixture()])
+        .args(["--max-spans", "2"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Error: a: 1 spans rejected while loading (invalid spans or memory limits); the run would be incomplete\n"
+    );
 }
 
 #[test]
