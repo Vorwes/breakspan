@@ -1,4 +1,4 @@
-use breakspan_core::{Trace, render_tree};
+use breakspan_core::{Trace, compare_steps, render_tree};
 use breakspan_otlp::{DEFAULT_MAX_RECORDING_BYTES, Recorder, RecordingOptions};
 use breakspan_store::{MemoryStore, StoreLimits};
 use clap::{Parser, Subcommand};
@@ -49,6 +49,19 @@ enum Command {
         #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1..))]
         max_spans: u32,
     },
+    /// Compare two single-trace recordings and report their first divergent step.
+    ///
+    /// Exits 0 without divergence, 1 when the runs diverge and 2 on errors.
+    Diff {
+        a: PathBuf,
+        b: PathBuf,
+        /// Applies to each recording.
+        #[arg(long, default_value_t = DEFAULT_MAX_RECORDING_BYTES, value_parser = clap::value_parser!(u64).range(8..))]
+        max_recording_bytes: u64,
+        /// Applies to each recording.
+        #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1..))]
+        max_spans: u32,
+    },
 }
 
 #[tokio::main]
@@ -87,6 +100,20 @@ async fn run(cli: Cli) -> CliResult<ExitCode> {
             max_recording_bytes,
             max_spans,
         } => show(file, max_recording_bytes, max_spans as usize).await,
+        Command::Diff {
+            a,
+            b,
+            max_recording_bytes,
+            max_spans,
+        } => {
+            // Like diff(1), errors exit 2 because 1 means "the runs differ".
+            Ok(diff(a, b, max_recording_bytes, max_spans as usize)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("Error: {error}");
+                    ExitCode::from(2)
+                }))
+        }
     }
 }
 
@@ -181,6 +208,52 @@ async fn show(file: PathBuf, max_bytes: u64, max_spans: usize) -> CliResult<Exit
     Ok(ExitCode::SUCCESS)
 }
 
+async fn diff(a: PathBuf, b: PathBuf, max_bytes: u64, max_spans: usize) -> CliResult<ExitCode> {
+    let a = load_single_trace("a", a, max_bytes, max_spans).await?;
+    let b = load_single_trace("b", b, max_bytes, max_spans).await?;
+    let diverged = tokio::task::spawn_blocking(move || -> io::Result<bool> {
+        let comparison = compare_steps(&a, &b);
+        let stdout = io::stdout();
+        let mut output = stdout.lock();
+        writeln!(output, "{comparison}")?;
+        output.flush()?;
+        Ok(comparison.diverged())
+    })
+    .await??;
+    Ok(ExitCode::from(u8::from(diverged)))
+}
+
+/// A partial load is an error: a truncated run must not look like a divergence.
+async fn load_single_trace(
+    side: &str,
+    file: PathBuf,
+    max_bytes: u64,
+    max_spans: usize,
+) -> CliResult<Trace> {
+    let store = MemoryStore::new(StoreLimits {
+        max_spans,
+        ..Default::default()
+    });
+    let report = breakspan_otlp::load(file, store.clone(), max_bytes)
+        .await
+        .map_err(|error| format!("{side}: {error}"))?;
+    if report.rejected_spans != 0 {
+        eprintln!(
+            "Warning: {side}: {} spans rejected while loading (invalid spans or memory limits).",
+            report.rejected_spans
+        );
+    }
+    if let Some(warning) = report.warning {
+        return Err(format!("{side}: recording loaded only partially: {warning}").into());
+    }
+    match <[Trace; 1]>::try_from(store.snapshots().await) {
+        Ok([trace]) => Ok(trace),
+        Err(traces) => {
+            Err(format!("{side}: expected exactly one trace, found {}", traces.len()).into())
+        }
+    }
+}
+
 async fn print_snapshots(snapshots: Vec<Trace>) -> CliResult<()> {
     tokio::task::spawn_blocking(move || -> io::Result<()> {
         let stdout = io::stdout();
@@ -211,6 +284,15 @@ mod tests {
         for args in [
             vec!["breakspan", "listen", "--max-spans", "0"],
             vec!["breakspan", "show", "capture.bspan", "--max-spans", "0"],
+            vec![
+                "breakspan",
+                "diff",
+                "a.bspan",
+                "b.bspan",
+                "--max-spans",
+                "0",
+            ],
+            vec!["breakspan", "diff", "a.bspan"],
             vec![
                 "breakspan",
                 "listen",
