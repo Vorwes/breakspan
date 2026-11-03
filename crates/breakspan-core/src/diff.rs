@@ -95,7 +95,7 @@ pub fn compare_steps<'a>(a: &'a Trace, b: &'a Trace) -> StepComparison<'a> {
 
 /// Steps in pre-order. `Other` spans are transparent: their step descendants
 /// attach to the nearest step ancestor, or become roots. Siblings and roots
-/// sort by start time, step identity and span ID.
+/// sort by start time, step identity, error status and span ID.
 fn steps(trace: &Trace) -> Vec<Step<'_>> {
     let mut children: BTreeMap<Option<SpanId>, Vec<&Span>> = BTreeMap::new();
     // The shared traversal visits each span once and terminates on cycles, so
@@ -146,7 +146,10 @@ fn steps(trace: &Trace) -> Vec<Step<'_>> {
     sequence
 }
 
-fn order(span: &Span) -> (u64, u8, &str, SpanId) {
+/// Every compared field of a step itself precedes the span ID, so equal start
+/// times only fall back to random IDs between steps that compare equal. Such
+/// steps can still differ in their descendants.
+fn order(span: &Span) -> (u64, u8, &str, bool, SpanId) {
     let kind = match span.operation {
         OperationKind::Agent => 0,
         OperationKind::Model => 1,
@@ -157,6 +160,7 @@ fn order(span: &Span) -> (u64, u8, &str, SpanId) {
         span.timing.start_unix_nanos(),
         kind,
         step_name(span),
+        is_error(span),
         span.id,
     )
 }
@@ -454,6 +458,18 @@ mod tests {
         let a = tools(2, 3);
         let b = tools(3, 2);
         assert!(!compare_steps(&a, &b).diverged());
+        // Parallel calls of the same tool, one failing: the failing call's
+        // span ID must not decide the order.
+        let parallel = |failing: u8| {
+            let mut spans = vec![
+                at(step(1, None, OperationKind::Agent, "agent"), 1),
+                at(step(2, Some(1), OperationKind::Tool, "calculator"), 5),
+                at(step(3, Some(1), OperationKind::Tool, "calculator"), 5),
+            ];
+            spans[usize::from(failing) - 1].status = SpanStatus::Error(String::new());
+            trace(spans)
+        };
+        assert!(!compare_steps(&parallel(2), &parallel(3)).diverged());
         // Models sort before tools at equal start times.
         let mut spans = vec![at(step(5, Some(1), OperationKind::Tool, "gamma"), 5)];
         spans.extend(a.spans().values().cloned());
