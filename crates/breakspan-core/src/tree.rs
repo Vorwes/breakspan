@@ -8,14 +8,50 @@ use std::{
 /// Missing parents remain visible, cycles cannot recurse forever, and traversal
 /// is iterative so deeply nested untrusted input cannot overflow the stack.
 pub fn render_tree(trace: &Trace) -> String {
-    let hierarchy = Hierarchy::new(trace);
     let mut output = format!(
         "Trace {} (snapshot, {} spans)\n",
         trace.id(),
         trace.spans().len()
     );
+    walk(
+        trace,
+        |root| {
+            let note = match root.parent_id {
+                Some(parent) if !trace.spans().contains_key(&parent) => " [missing parent]",
+                Some(_) => " [cyclic parent component]",
+                None => "",
+            };
+            (Vec::new(), note)
+        },
+        |_, (path, _): &(Vec<bool>, &str), index, siblings| {
+            // Cap visual indentation and path allocation, not traversal depth.
+            let mut child_path = path.clone();
+            if child_path.len() < 65 {
+                child_path.push(index + 1 == siblings);
+            } else if let Some(last) = child_path.last_mut() {
+                *last = index + 1 == siblings;
+            }
+            (child_path, "")
+        },
+        |span, (path, note)| write_span_line(&mut output, span, path, note),
+    );
+    output
+}
+
+/// Visit every span exactly once in deterministic pre-order: true roots and
+/// missing-parent roots first, then the remaining components, which are
+/// necessarily parent cycles. Each visit receives state derived from its
+/// traversal parent: `root_state` starts a component and `child_state` takes
+/// the parent span, its state, and the child's sibling index and sibling count.
+pub(crate) fn walk<'a, S>(
+    trace: &'a Trace,
+    root_state: impl Fn(&'a Span) -> S,
+    child_state: impl Fn(&'a Span, &S, usize, usize) -> S,
+    mut visit: impl FnMut(&'a Span, &S),
+) {
+    let hierarchy = Hierarchy::new(trace);
     let mut visited = BTreeSet::new();
-    // Unvisited components after roots are necessarily parent cycles.
+    let mut stack = Vec::new();
     for seed in hierarchy
         .roots
         .iter()
@@ -26,9 +62,21 @@ pub fn render_tree(trace: &Trace) -> String {
             continue;
         }
         let root = component_root(trace, seed);
-        render_component(trace, &hierarchy, root, &mut visited, &mut output);
+        stack.push((root, root_state(root)));
+        while let Some((span, state)) = stack.pop() {
+            if !visited.insert(span.id) {
+                continue;
+            }
+            visit(span, &state);
+            if let Some(siblings) = hierarchy.children.get(&span.id) {
+                for (i, child) in siblings.iter().enumerate().rev() {
+                    if !visited.contains(&child.id) {
+                        stack.push((child, child_state(span, &state, i, siblings.len())));
+                    }
+                }
+            }
+        }
     }
-    output
 }
 
 /// A sorted index borrowing spans, not a second domain model.
@@ -67,7 +115,7 @@ impl<'a> Hierarchy<'a> {
 
 fn component_root<'a>(trace: &'a Trace, seed: &'a Span) -> &'a Span {
     // A remaining seed may be a descendant of a cycle with an earlier
-    // timestamp (clock skew). Walk to the cycle before rendering, rather
+    // timestamp (clock skew). Walk to the cycle before traversing, rather
     // than splitting one component into several apparent roots.
     let mut root = seed;
     let mut ancestry = BTreeSet::new();
@@ -81,42 +129,6 @@ fn component_root<'a>(trace: &'a Trace, seed: &'a Span) -> &'a Span {
         }
     }
     root
-}
-
-fn render_component(
-    trace: &Trace,
-    hierarchy: &Hierarchy<'_>,
-    root: &Span,
-    visited: &mut BTreeSet<SpanId>,
-    output: &mut String,
-) {
-    let annotation = match root.parent_id {
-        Some(parent) if !trace.spans().contains_key(&parent) => " [missing parent]",
-        Some(_) => " [cyclic parent component]",
-        None => "",
-    };
-    let mut stack = vec![(root, Vec::<bool>::new(), annotation)];
-    while let Some((span, path, note)) = stack.pop() {
-        if !visited.insert(span.id) {
-            continue;
-        }
-        write_span_line(output, span, &path, note);
-        if let Some(siblings) = hierarchy.children.get(&span.id) {
-            for (i, child) in siblings.iter().enumerate().rev() {
-                if visited.contains(&child.id) {
-                    continue;
-                }
-                // Cap visual indentation and path allocation, not traversal depth.
-                let mut child_path = path.clone();
-                if child_path.len() < 65 {
-                    child_path.push(i + 1 == siblings.len());
-                } else if let Some(last) = child_path.last_mut() {
-                    *last = i + 1 == siblings.len();
-                }
-                stack.push((child, child_path, ""));
-            }
-        }
-    }
 }
 
 fn write_span_line(output: &mut String, span: &Span, path: &[bool], note: &str) {
@@ -143,7 +155,7 @@ fn write_span_line(output: &mut String, span: &Span, path: &[bool], note: &str) 
 }
 
 // Names are external input: escape terminal controls and bound each label.
-fn safe_text(text: &str) -> String {
+pub(crate) fn safe_text(text: &str) -> String {
     let mut result = String::new();
     for c in text.chars().take(200) {
         if c.is_control() {
