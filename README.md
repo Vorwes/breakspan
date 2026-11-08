@@ -91,7 +91,7 @@ buffer or queue to flush. Successful writes do not guarantee `fsync` durability.
 including fields not shown in trees. They are not byte-for-byte network captures:
 unknown protobuf wire fields are not preserved. Never commit captured recordings,
 even if they appear harmless. Root `/recordings/` is ignored for local use;
-only the intentionally synthetic fixture belongs in Git.
+only intentionally synthetic fixtures belong in Git.
 
 ### Compare two recordings
 
@@ -134,6 +134,10 @@ Missing parents, multiple roots and parent cycles are compared deterministically
 but such malformed hierarchies can make the reported position less meaningful.
 Sibling steps that start at the same time and match in identity and status, but
 differ in their descendants, are still ordered by span ID.
+
+Synthetic pass/fail pairs for common agent failures, with the output `diff`
+reports for each and where that output falls short, are in
+[failure pairs](docs/failure-pairs.md).
 
 ### Reproducible external instrumentation demo
 
@@ -280,6 +284,8 @@ uv run examples/langchain_gemini_agent.py --self-test
 cargo test -p breakspan-otlp --test grpc_ingestion
 # Regenerate only the intentionally synthetic recording fixture:
 cargo test -p breakspan-otlp --test recording regenerate_synthetic_fixture -- --ignored --exact --nocapture
+# Regenerate only the synthetic failure pairs used by the diff tests:
+cargo test -p breakspan-otlp --test recording regenerate_failure_fixtures -- --ignored --exact
 ```
 
 See [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md),
