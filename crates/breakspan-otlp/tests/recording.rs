@@ -899,3 +899,188 @@ async fn regenerate_synthetic_fixture() {
     assert_eq!(render_tree(&store.trace(trace_id()).await.unwrap()), live);
     eprintln!("BEGIN EXPECTED CLI STDOUT\n{live}END EXPECTED CLI STDOUT");
 }
+
+/// A scenario name with its passing and failing export.
+type FailurePair = (
+    &'static str,
+    ExportTraceServiceRequest,
+    ExportTraceServiceRequest,
+);
+
+/// Synthetic passing/failing run pairs for common agent failure shapes, read by
+/// the CLI `diff` tests and `docs/failure-pairs.md`. Only operation and
+/// step-name attributes are set; there are no prompts, arguments or results.
+fn failure_pairs() -> [FailurePair; 5] {
+    const TOOL: &str = "calculator";
+    let pass = || run(vec![agent(), model(2, 1), tool(3, 1, TOOL), model(4, 1)]);
+    let graph_run = |tool_status: fn(Span) -> Span| {
+        run(vec![
+            agent(),
+            graph(2, 1, "agent graph"),
+            model(3, 2),
+            graph(4, 2, "tool node"),
+            tool_status(tool(5, 4, TOOL)),
+            model(6, 2),
+        ])
+    };
+    [
+        (
+            "tool-error-recovery",
+            pass(),
+            run(vec![
+                agent(),
+                model(2, 1),
+                failed(tool(3, 1, TOOL)),
+                model(4, 1),
+                tool(5, 1, TOOL),
+                model(6, 1),
+            ]),
+        ),
+        (
+            "tool-loop",
+            pass(),
+            run(vec![
+                agent(),
+                model(2, 1),
+                tool(3, 1, TOOL),
+                model(4, 1),
+                tool(5, 1, TOOL),
+                model(6, 1),
+                tool(7, 1, TOOL),
+                model(8, 1),
+            ]),
+        ),
+        ("early-stop", pass(), run(vec![agent(), model(2, 1)])),
+        (
+            "wrong-tool",
+            pass(),
+            run(vec![
+                agent(),
+                model(2, 1),
+                tool(3, 1, "web_search"),
+                model(4, 1),
+            ]),
+        ),
+        (
+            "transparent-error",
+            graph_run(|span| span),
+            graph_run(failed),
+        ),
+    ]
+}
+
+fn failure_fixture(scenario: &str, side: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../breakspan-cli/tests/fixtures")
+        .join(format!("{scenario}-{side}.bspan"))
+}
+
+fn string_attribute(key: &str, value: &str) -> KeyValue {
+    KeyValue {
+        key: key.into(),
+        value: Some(AnyValue {
+            value: Some(Value::StringValue(value.into())),
+        }),
+        ..Default::default()
+    }
+}
+
+/// A classified step named by its convention attribute; the span name follows
+/// the GenAI `{operation} {name}` pattern.
+fn step(id: u8, parent: Option<u8>, operation: &str, key: &str, name: &str) -> Span {
+    let mut span = span(id, parent, operation, &format!("{operation} {name}"));
+    span.attributes.push(string_attribute(key, name));
+    span
+}
+fn agent() -> Span {
+    step(
+        1,
+        None,
+        "invoke_agent",
+        "gen_ai.agent.name",
+        "synthetic-agent",
+    )
+}
+fn model(id: u8, parent: u8) -> Span {
+    step(
+        id,
+        Some(parent),
+        "chat",
+        "gen_ai.request.model",
+        "synthetic-model",
+    )
+}
+fn tool(id: u8, parent: u8, name: &str) -> Span {
+    step(id, Some(parent), "execute_tool", "gen_ai.tool.name", name)
+}
+/// A graph/chain node without `gen_ai.operation.name`, classified as `Other`.
+fn graph(id: u8, parent: u8, name: &str) -> Span {
+    let mut span = span(id, Some(parent), "", name);
+    span.attributes.clear();
+    span
+}
+fn failed(mut span: Span) -> Span {
+    span.status = Some(Status {
+        code: 2,
+        message: "synthetic failure".into(),
+    });
+    span
+}
+/// One export whose parents end after their descendants. Parents must precede
+/// their children, which have larger IDs and therefore start later.
+fn run(mut spans: Vec<Span>) -> ExportTraceServiceRequest {
+    for child in (1..spans.len()).rev() {
+        let parent = spans[..child]
+            .iter()
+            .position(|span| span.span_id == spans[child].parent_span_id)
+            .unwrap();
+        spans[parent].end_time_unix_nano = spans[parent]
+            .end_time_unix_nano
+            .max(spans[child].end_time_unix_nano + 1_000_000);
+    }
+    request(spans)
+}
+
+#[test]
+fn committed_failure_fixtures_match_their_generator() {
+    for (scenario, pass, fail) in failure_pairs() {
+        for (side, export) in [("pass", pass), ("fail", fail)] {
+            let path = failure_fixture(scenario, side);
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                recording(&[export]),
+                "{} is stale; regenerate it",
+                path.display()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "explicitly regenerates the checked-in failure fixture pairs through real OTLP/gRPC"]
+async fn regenerate_failure_fixtures() {
+    for (scenario, pass, fail) in failure_pairs() {
+        for (side, export) in [("pass", pass), ("fail", fail)] {
+            let path = failure_fixture(scenario, side);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // The recorder uses create_new; replace only these synthetic fixtures.
+            match fs::remove_file(&path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => panic!("cannot replace synthetic fixture: {error}"),
+            }
+            let mut receiver =
+                TestReceiver::start(&path, RecordingOptions::default(), MemoryStore::default())
+                    .await;
+            assert!(
+                receiver
+                    .export(export.clone())
+                    .await
+                    .partial_success
+                    .is_none()
+            );
+            receiver.shutdown().await;
+            assert_eq!(fs::read(&path).unwrap(), recording(&[export]));
+        }
+    }
+}

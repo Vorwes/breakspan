@@ -97,6 +97,51 @@ fn diverging_recordings_exit_one() {
     );
 }
 
+/// Committed failure pair; regenerate with `regenerate_failure_fixtures`.
+fn failure_fixture(scenario: &str, side: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(format!("{scenario}-{side}.bspan"))
+}
+
+#[test]
+fn failure_pairs_report_their_first_divergence() {
+    // Output is documented in docs/failure-pairs.md; keep the two in sync.
+    let path = "  path: agent synthetic-agent\n";
+    let ok_tool = "tool calculator  depth 1  [ok]";
+    let failed_tool = "tool calculator  depth 1  [error]";
+    for (scenario, step, a, b) in [
+        ("tool-error-recovery", 3, ok_tool, failed_tool),
+        ("tool-loop", 5, "(no more steps)", ok_tool),
+        ("early-stop", 3, ok_tool, "(no more steps)"),
+        ("wrong-tool", 3, ok_tool, "tool web_search  depth 1  [ok]"),
+        ("transparent-error", 3, ok_tool, failed_tool),
+    ] {
+        let pass = failure_fixture(scenario, "pass");
+        let fail = failure_fixture(scenario, "fail");
+        let output = diff(&pass, &fail);
+        assert_eq!(output.status.code(), Some(1), "{scenario}: {output:?}");
+        let matching = step - 1;
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!(
+                "First divergence at step {step}\n{path}  a: {a}\n  b: {b}\n\
+                 {matching} matching steps before divergence.\n"
+            ),
+            "{scenario}"
+        );
+        assert!(output.stderr.is_empty(), "{scenario}");
+
+        let output = diff(&pass, &pass);
+        assert_eq!(output.status.code(), Some(0), "{scenario}: {output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "No divergence: 4 matching steps.\n",
+            "{scenario}"
+        );
+    }
+}
+
 #[test]
 fn unusable_recordings_exit_two_without_comparing() {
     let temp = TempDir::new();
